@@ -1,7 +1,7 @@
 // ============================================================
-// O QUARTO DO VIGIA - cena de terror em OpenGL Legado (pipeline fixo)
+// 1 Noite com o Frederico
 //
-// Requisitos academicos cobertos (ver comentarios "[Requisito X]"
+// Requisitos cobertos (ver comentarios "[Requisito X]"
 // espalhados pelo codigo e nos outros arquivos do projeto):
 //   A - Modelagem de objetos 3D com primitivas       -> scene_builder.*, enemy.*
 //   B - Transformacoes geometricas (hierarquia)      -> enemy.cpp (push/pop matrix)
@@ -323,7 +323,7 @@ int main(int argc, char** argv) {
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(g_windowW, g_windowH);
-    glutCreateWindow("O Quarto do Vigia - Cena de Terror (OpenGL Legado)");
+    glutCreateWindow("1 Noite com o Frederico");
 
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);

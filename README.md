@@ -1,4 +1,4 @@
-# O Quarto do Vigia
+# 1 Noite com o Frederico
 
 Você é o vigia noturno. Sua sala é pequena, mal iluminada, e tem só uma
 abertura: um corredor comprido que se perde na escuridão. Você não pode
@@ -11,10 +11,8 @@ direita, cada vez mais perto. Enquanto ela estiver no escuro, ela se
 aproxima. Se a lanterna a pegar, ela recua. E se ela chegar até a porta
 sem nunca ter sido vista... bom, você vai saber na hora.
 
-É uma cena 3D interativa em C++ e OpenGL puro — nada de placas de vídeo
-modernas fazendo o trabalho pesado por shader: aqui é tudo pipeline fixo
-(`glBegin`/`glEnd`, `glPushMatrix`, `glLightfv`...), do jeito que se
-aprende OpenGL clássico. O monstro é montado à mão, osso por osso, com
+É uma cena 3D interativa em C++ e OpenGL, tudo pipeline fixo
+(`glBegin`/`glEnd`, `glPushMatrix`, `glLightfv`...). O monstro é montado à mão, osso por osso, com
 esferas e cubos do GLUT; o jeito como ele anda vem de senos e cossenos
 mexendo nas juntas em tempo real; e o caminho dele pelo corredor é
 literalmente uma curva de Bézier calculada a cada frame.
@@ -66,8 +64,3 @@ O código tem comentários marcando onde cada exigência do enunciado (
 modelagem com primitivas, hierarquia com push/pop matrix, animação por
 tempo, mouse/teclado, câmera/perspectiva, iluminação e a curva de
 Bézier) foi implementada — útil na hora da correção, se for o caso.
-
-Compilei e rodei este projeto aqui antes de te entregar (g++ com
-`-Wall`, zero warnings, e um teste real dentro do `glutMainLoop`), então
-o esperado é que só precise ajustar as bibliotecas do seu sistema para
-compilar de primeira.
