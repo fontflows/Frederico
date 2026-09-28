@@ -8,11 +8,13 @@ apertarem, fechar a porta.
 No fundo do corredor, alguma coisa se move. Ela não anda em linha reta:
 avança serpenteando pelas sombras, um pouco pra esquerda, um pouco pra
 direita, cada vez mais perto. Enquanto ela estiver no escuro, ela se
-aproxima. Se a lanterna a pegar, ela recua. E se ela chegar até a porta
-sem nunca ter sido vista... bom, você vai saber na hora.
+aproxima. Se a lanterna a pegar, ela recua. Só que lanterna e porta
+dividem a mesma bateria — e ela não recarrega. Cada uso conta, e cada
+vez que você repele o bicho e ele volta, ele vem um pouco mais rápido
+(e um pouco imprevisível) que da vez anterior. E se ele chegar até a
+porta sem nunca ter sido visto... bom, você vai saber na hora.
 
-É uma cena 3D interativa em C++ e OpenGL, tudo pipeline fixo
-(`glBegin`/`glEnd`, `glPushMatrix`, `glLightfv`...). O monstro é montado à mão, osso por osso, com
+É uma cena 3D interativa em C++ e OpenGL. O monstro é montado à mão, osso por osso, com
 esferas e cubos do GLUT; o jeito como ele anda vem de senos e cossenos
 mexendo nas juntas em tempo real; e o caminho dele pelo corredor é
 literalmente uma curva de Bézier calculada a cada frame.
@@ -45,8 +47,10 @@ quarto_do_vigia.exe
 | Fechar/abrir a porta de emergência | `D`         |
 | Sair                           | `ESC`            |
 
-Dica: a porta tranca o monstro do lado de fora, mas com ela fechada
-você também não vê mais nada chegando.
+Dica: a porta contém o monstro por completo, mas gasta bateria bem mais
+rápido que a lanterna — é o botão de pânico, não uma solução pra deixar
+fechada o tempo todo. A lanterna sozinha já seguindo o corredor costuma
+bastar; guarde a porta pra quando ele estiver perto demais.
 
 ## Por dentro do código
 

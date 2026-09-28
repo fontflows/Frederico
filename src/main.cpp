@@ -1,7 +1,7 @@
 // ============================================================
 // 1 Noite com o Frederico
 //
-// Requisitos cobertos (ver comentarios "[Requisito X]"
+// Requisitos academicos cobertos (ver comentarios "[Requisito X]"
 // espalhados pelo codigo e nos outros arquivos do projeto):
 //   A - Modelagem de objetos 3D com primitivas       -> scene_builder.*, enemy.*
 //   B - Transformacoes geometricas (hierarquia)      -> enemy.cpp (push/pop matrix)
@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 #include "bezier.h"
 #include "lighting.h"
@@ -36,18 +37,28 @@ const float DEG2RAD            = 3.14159265f / 180.0f;
 const float YAW_LIMIT_DEG      = 75.0f;  // limite de giro da cabeca (esquerda/direita)
 const float PITCH_LIMIT_DEG    = 42.0f;  // limite de giro da cabeca (cima/baixo)
 const float MOUSE_SENSITIVITY  = 0.15f;
-const float ADVANCE_RATE       = 0.045f; // velocidade de avanco do monstro (em t/seg) no escuro
-const float RETREAT_RATE       = 0.09f;  // velocidade de recuo quando a lanterna esta ligada
+const float ADVANCE_RATE_BASE  = 0.075f;  // velocidade "normal" de avanco do monstro (t/seg) no escuro
+const float RETREAT_RATE       = 0.025f; // velocidade de recuo quando a lanterna esta ligada (so' 1.5x o avanco)
 const float JUMPSCARE_DURATION = 0.9f;   // duracao do salto final, em segundos
 const float DOOR_SPEED         = 3.0f;   // velocidade de abrir/fechar a porta (unid/seg)
 const float RESET_PAUSE        = 1.6f;   // pausa apos o jumpscare antes de reiniciar o encontro
 
 // [Gameplay] Bateria compartilhada entre lanterna e porta, como no
 // jogo original: cada uma consome energia enquanto estiver ativa, e
-// quando acaba, as duas param de funcionar (e nao voltam mais).
-const float POWER_MAX          = 100.0f;
-const float POWER_DRAIN_LIGHT  = POWER_MAX / 50.0f; // lanterna ligada sem parar: acaba em 50s
-const float POWER_DRAIN_DOOR   = POWER_MAX / 35.0f; // porta fechada sem parar: acaba em 35s (gasta mais)
+// quando acaba, as duas param de funcionar (e nao voltam mais). A
+// porta gasta bem mais rapido -- ela e' o "botao de panico", nao uma
+// solucao pra deixar ligada o tempo todo.
+const float POWER_MAX         = 100.0f;
+const float POWER_DRAIN_LIGHT = POWER_MAX / 50.0f; // lanterna ligada sem parar: acaba em 50s
+const float POWER_DRAIN_DOOR  = POWER_MAX / 25.0f; // porta fechada sem parar: acaba em 25s
+
+// [Gameplay] Dificuldade cresce a cada vez que o monstro e' repelido e
+// volta a tentar: fica um pouco mais rapido, e a velocidade varia (nao
+// da' pra decorar o tempo exato de reacao).
+const float SPEED_RAMP_PER_TRY = 0.12f; // +12% de velocidade por tentativa
+const float SPEED_RAMP_CAP     = 2.2f;  // nao passa de 2.2x a velocidade base
+const float SPEED_JITTER_MIN   = 0.85f;
+const float SPEED_JITTER_MAX   = 1.25f;
 
 // ---------------------------------------------------------------
 // Estado global da aplicacao
@@ -74,7 +85,32 @@ float g_jumpscareProgress = 0.0f;
 bool  g_pausing    = false;
 float g_pauseTimer = 0.0f;
 
+int   g_encounterCount   = 0;   // quantas vezes o monstro ja' tentou chegar
+float g_speedMultiplier  = 1.0f; // recalculado a cada nova tentativa
+
 int g_lastTimeMs = 0;
+
+// [Gameplay] Sorteia um numero em [SPEED_JITTER_MIN, SPEED_JITTER_MAX].
+float randomJitter() {
+    return SPEED_JITTER_MIN
+         + (float)rand() / (float)RAND_MAX * (SPEED_JITTER_MAX - SPEED_JITTER_MIN);
+}
+
+// [Gameplay] Prepara uma nova tentativa do monstro: volta pro comeco da
+// curva e sorteia uma velocidade nova (base sobe um pouco a cada
+// tentativa + variacao aleatoria), pra nao dar pra decorar o tempo
+// exato de reacao nem pra ficar mais facil com o tempo.
+void startNewEncounter() {
+    g_monsterT           = 0.0f;
+    g_jumpscareActive    = false;
+    g_jumpscareProgress  = 0.0f;
+
+    float ramp = 1.0f + SPEED_RAMP_PER_TRY * g_encounterCount;
+    if (ramp > SPEED_RAMP_CAP) ramp = SPEED_RAMP_CAP;
+    g_speedMultiplier = ramp * randomJitter();
+
+    g_encounterCount++;
+}
 
 // ---------------------------------------------------------------
 // [Requisito E] Camera: direcao "para frente" a partir de yaw/pitch
@@ -104,10 +140,20 @@ Vector3 currentMonsterPosition() {
     return doorwayPos + (lungeTarget - doorwayPos) * g_jumpscareProgress;
 }
 
-// [Gameplay] Desenha a barra de energia no canto da tela. Tecnica padrao
-// de HUD em OpenGL classico: troca pra uma projecao ortografica 2D (em
-// pixels), desenha uns quads simples sem luz/profundidade, e desfaz a
-// troca no final. Nao mexe na projecao/camera 3D usada no resto da cena.
+// [Gameplay] Escreve uma string na tela usando as fontes bitmap do
+// GLUT (nao precisa de nenhuma biblioteca extra de texto).
+void drawBitmapText(float x, float y, const char* text) {
+    glRasterPos2f(x, y);
+    for (const char* c = text; *c != '\0'; ++c) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+    }
+}
+
+// [Gameplay] Desenha a barra de energia (com a porcentagem em numero)
+// no canto da tela. Tecnica padrao de HUD em OpenGL classico: troca
+// pra uma projecao ortografica 2D (em pixels), desenha uns quads
+// simples sem luz/profundidade, e desfaz a troca no final. Nao mexe
+// na projecao/camera 3D usada no resto da cena.
 void drawPowerBar() {
     glDisable(GL_LIGHTING);
     glDisable(GL_DEPTH_TEST);
@@ -146,6 +192,12 @@ void drawPowerBar() {
         glVertex2f(MARGIN + BAR_W * frac, MARGIN + BAR_H);
         glVertex2f(MARGIN,               MARGIN + BAR_H);
     glEnd();
+
+    // numero da porcentagem, escrito acima da barra
+    char label[32];
+    std::snprintf(label, sizeof(label), "ENERGIA: %d%%", (int)(frac * 100.0f + 0.5f));
+    glColor3f(1.0f, 1.0f, 1.0f);
+    drawBitmapText(MARGIN, MARGIN + BAR_H + 8.0f, label);
 
     glPopMatrix(); // MODELVIEW
     glMatrixMode(GL_PROJECTION);
@@ -209,11 +261,14 @@ void keyboard(unsigned char key, int, int) {
     switch (key) {
         case 'f':
         case 'F':
-            g_flashlightOn = !g_flashlightOn;
+            // So' liga se ainda tiver energia; desligar sempre pode.
+            if (g_flashlightOn)      g_flashlightOn = false;
+            else if (g_power > 0.0f) g_flashlightOn = true;
             break;
         case 'd':
         case 'D':
-            g_doorClosing = !g_doorClosing;
+            if (g_doorClosing)       g_doorClosing = false;
+            else if (g_power > 0.0f) g_doorClosing = true;
             break;
         case 27: // ESC
             exit(0);
@@ -272,13 +327,23 @@ void timerFunc(int) {
         g_doorOffsetY = fmaxf(g_doorOffsetY - DOOR_SPEED * dt, doorTarget);
     bool doorSealed = g_doorOffsetY >= (Scene::DOORWAY_HEIGHT - 0.01f);
 
+    // --- Bateria: a lanterna e a porta fechada consomem energia. Ao
+    // zerar, as duas param de funcionar e nao voltam mais. ---
+    float drain = 0.0f;
+    if (g_flashlightOn) drain += POWER_DRAIN_LIGHT;
+    if (g_doorClosing)  drain += POWER_DRAIN_DOOR;
+    g_power -= drain * dt;
+    if (g_power <= 0.0f) {
+        g_power        = 0.0f;
+        g_flashlightOn = false;
+        g_doorClosing  = false; // a porta comeca a abrir sozinha
+    }
+
     if (g_pausing) {
         g_pauseTimer += dt;
         if (g_pauseTimer >= RESET_PAUSE) {
-            g_pausing           = false;
-            g_jumpscareActive   = false;
-            g_jumpscareProgress = 0.0f;
-            g_monsterT          = 0.0f;
+            g_pausing = false;
+            startNewEncounter();
         }
     } else if (g_jumpscareActive) {
         g_jumpscareProgress += dt / JUMPSCARE_DURATION;
@@ -289,14 +354,14 @@ void timerFunc(int) {
         }
     } else {
         // [Gameplay] regra simples: lanterna ligada afasta o monstro,
-        // desligada ele se aproxima. Nada de calculo de angulo -- e'
-        // so' o estado da lanterna mesmo.
+        // desligada ele se aproxima -- na velocidade sorteada para
+        // esta tentativa (ver startNewEncounter).
         if (doorSealed) {
             // Porta trancada: o monstro fica contido do lado de fora do corredor.
         } else if (g_flashlightOn) {
             g_monsterT -= RETREAT_RATE * dt;
         } else {
-            g_monsterT += ADVANCE_RATE * dt;
+            g_monsterT += ADVANCE_RATE_BASE * g_speedMultiplier * dt;
         }
 
         if (g_monsterT < 0.0f) g_monsterT = 0.0f;
@@ -339,16 +404,20 @@ int main(int argc, char** argv) {
 
     initGL();
 
+    std::srand((unsigned int)std::time(nullptr));
+    startNewEncounter();
+
     g_lastTimeMs = glutGet(GLUT_ELAPSED_TIME);
     glutTimerFunc(16, timerFunc, 0);
 
     std::printf("Controles:\n");
     std::printf("  Mouse - olhar ao redor (limitado, como um pescoco humano)\n");
-    std::printf("  F     - ligar/desligar a lanterna\n");
-    std::printf("  D     - fechar/abrir a porta de seguranca\n");
+    std::printf("  F     - ligar/desligar a lanterna (gasta energia)\n");
+    std::printf("  D     - fechar/abrir a porta de seguranca (gasta energia bem mais rapido)\n");
     std::printf("  ESC   - sair\n");
-    std::printf("Ligue a lanterna para afastar o monstro. Se ele chegar a porta\n");
-    std::printf("com a lanterna desligada, prepare-se...\n");
+    std::printf("A bateria e' compartilhada entre a lanterna e a porta -- quando\n");
+    std::printf("acaba, as duas param de funcionar de vez. Use a porta so' quando\n");
+    std::printf("precisar de verdade; a lanterna sozinha ja' segura o monstro.\n");
 
     glutMainLoop();
     return 0;
