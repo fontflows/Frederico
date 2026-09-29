@@ -35,4 +35,16 @@ void drawCorridor();
 // ate DOORWAY_HEIGHT (porta totalmente fechada, tocando o chao).
 void drawDoor(float doorOffsetY);
 
+// Desenha os moveis da sala de seguranca (tapete, moldura da porta, mesa
+// com computador, ventilador e poster, e armario). time e' o tempo em
+// segundos e anima o ventilador e a tela do monitor. Tambem configura a
+// luz do monitor, entao deve ser chamada antes das paredes.
+void drawRoomProps(float time);
+
+// Desenha o interruptor da porta, ao lado da abertura. doorClosing indica
+// se a porta esta' fechada (define a posicao da alavanca e a cor do LED:
+// verde = aberta, vermelho = fechada). hasPower false apaga o LED
+// (bateria acabou). Deve ser chamada depois das paredes.
+void drawDoorSwitch(bool doorClosing, bool hasPower);
+
 #endif // SCENE_BUILDER_H
