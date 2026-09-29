@@ -20,7 +20,7 @@ ifeq ($(OS),Windows_NT)
     # SEMPRE compilamos e linkamos com o mesmo g++ que tem o freeglut do lado.
     CXX  := C:/msys64/mingw64/bin/g++.exe
     LIBS := -lfreeglut -lopengl32 -lglu32
-    BIN  := quarto_do_vigia.exe
+    BIN  := frederico.exe
     RM   := del /Q
     FIXPATH = $(subst /,\,$1)
 else
@@ -31,7 +31,7 @@ else
     else
         LIBS := -lglut -lGLU -lGL
     endif
-    BIN := quarto_do_vigia
+    BIN := frederico
     RM  := rm -f
     FIXPATH = $1
 endif
