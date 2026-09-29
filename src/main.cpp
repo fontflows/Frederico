@@ -106,22 +106,36 @@ const float POWER_DRAIN_DOOR  = POWER_MAX / 40.0f;  // energia por segundo com p
 // avanca (de 1.0x ate' SPEED_RAMP_END) e a velocidade oscila entre
 // JITTER_MIN e JITTER_MAX, sorteada de novo toda vez que ele e'
 // empurrado de volta ao fundo do corredor (o "humor" do monstro).
-const float SPEED_RAMP_END   = 1.45f;
+const float SPEED_RAMP_END   = 1.80f;
 const float SPEED_JITTER_MIN = 0.85f;
 const float SPEED_JITTER_MAX = 1.25f;
 
 // Sprints aleatorios: de vez em quando o monstro dispara. O intervalo
 // entre sprints e' sorteado entre GAP_MIN e GAP_MAX e vai encurtando ate'
-// ~45% conforme a noite avanca. Durante o sprint a lanterna so'
+// ~38% (SPRINT_GAP_SHRINK) conforme a noite avanca. Durante o sprint a lanterna so'
 // desacelera o monstro (ele continua avancando).
 const float SPRINT_RATE         = 0.30f; // velocidade do sprint (t/seg), ~4x a caminhada
 const float SPRINT_DURATION_MIN = 0.9f;  // duracao do sprint, em segundos
 const float SPRINT_DURATION_MAX = 1.5f;
 const float SPRINT_GAP_MIN      = 8.0f;  // intervalo entre sprints, em segundos
 const float SPRINT_GAP_MAX      = 16.0f;
-const float SPRINT_GAP_SHRINK   = 0.45f; // quanto o intervalo encurta ate' o fim da noite
+const float SPRINT_GAP_SHRINK   = 0.62f; // quanto o intervalo encurta ate' o fim da noite
 const float SPRINT_FIRST_DELAY  = 6.0f;  // folga extra antes do 1o sprint
 const float SPRINT_ANIM_BOOST   = 2.2f;  // pernas do monstro mexem mais rapido durante o sprint
+
+// Mais fatores que escalam com o tempo. Todos sao "valor no fim da noite"
+// relativo ao valor inicial (1.0 = igual ao comeco):
+//  - a lanterna vai perdendo forca (o monstro recua mais devagar);
+//  - o sprint fica mais veloz e dura mais;
+//  - a porta gasta mais bateria (segurar ele la' fora sai mais caro).
+const float RETREAT_RAMP_END      = 0.72f;
+const float SPRINT_RATE_RAMP_END  = 1.20f;
+const float SPRINT_DUR_RAMP_END   = 1.30f;
+const float DOOR_DRAIN_RAMP_END   = 1.50f;
+
+// Formato da curva de dificuldade: >1 deixa o comeco da noite mais
+// tranquilo e concentra o aperto na segunda metade (1.0 = linear).
+const float DIFFICULTY_CURVE = 1.4f;
 
 // A fonte vetorial (stroke) do GLUT tem ~119 unidades de altura.
 // Usamos isso pra escalar o texto pro tamanho em pixels que quisermos.
@@ -190,16 +204,39 @@ float randRange(float lo, float hi) {
 // Quanto da noite ja' passou, de 0 (inicio) a 1 (amanheceu).
 float nightProgress() { return clamp01(g_nightTime / NIGHT_DURATION); }
 
-// Velocidade de caminhada do monstro AGORA: cresce linearmente com o
-// progresso da noite e e' multiplicada pelo "humor" sorteado.
+// Nivel de dificuldade de 0 a 1: e' o progresso da noite passado por uma
+// curva (DIFFICULTY_CURVE), pra primeira metade ser mais justa.
+float difficulty() { return powf(nightProgress(), DIFFICULTY_CURVE); }
+
+// Velocidade de caminhada do monstro AGORA: cresce com a dificuldade e
+// e' multiplicada pelo "humor" sorteado.
 float currentSpeedMultiplier() {
-    return (1.0f + (SPEED_RAMP_END - 1.0f) * nightProgress()) * g_speedJitter;
+    return lerpf(1.0f, SPEED_RAMP_END, difficulty()) * g_speedJitter;
+}
+
+// Forca com que a lanterna empurra o monstro de volta (cai com o tempo).
+float currentRetreatRate() {
+    return RETREAT_RATE * lerpf(1.0f, RETREAT_RAMP_END, difficulty());
+}
+
+// Velocidade e duracao do sprint (crescem com o tempo).
+float currentSprintRate() {
+    return SPRINT_RATE * lerpf(1.0f, SPRINT_RATE_RAMP_END, difficulty());
+}
+float randomSprintDuration() {
+    return randRange(SPRINT_DURATION_MIN, SPRINT_DURATION_MAX)
+         * lerpf(1.0f, SPRINT_DUR_RAMP_END, difficulty());
+}
+
+// Consumo de bateria da porta fechada (cresce com o tempo).
+float currentDoorDrain() {
+    return POWER_DRAIN_DOOR * lerpf(1.0f, DOOR_DRAIN_RAMP_END, difficulty());
 }
 
 // Sorteia quando vem o proximo sprint. O intervalo encurta com o
 // progresso da noite (shrink vai de 1.0 ate' 1 - SPRINT_GAP_SHRINK).
 void scheduleNextSprint() {
-    float shrink = 1.0f - SPRINT_GAP_SHRINK * nightProgress();
+    float shrink = 1.0f - SPRINT_GAP_SHRINK * difficulty();
     g_nextSprintIn = randRange(SPRINT_GAP_MIN, SPRINT_GAP_MAX) * shrink;
 }
 
@@ -817,7 +854,7 @@ void timerFunc(int) {
         // zerar, as duas param de funcionar e nao voltam mais.
         float drain = 0.0f;
         if (g_flashlightOn) drain += POWER_DRAIN_LIGHT;
-        if (g_doorClosing)  drain += POWER_DRAIN_DOOR;
+        if (g_doorClosing)  drain += currentDoorDrain();
         g_power -= drain * dt;
         if (g_power <= 0.0f) {
             g_power        = 0.0f;
@@ -838,7 +875,7 @@ void timerFunc(int) {
             g_nextSprintIn -= dt;
             if (g_nextSprintIn <= 0.0f) {
                 g_sprinting      = true;
-                g_sprintTimeLeft = randRange(SPRINT_DURATION_MIN, SPRINT_DURATION_MAX);
+                g_sprintTimeLeft = randomSprintDuration();
             }
         }
 
@@ -848,14 +885,15 @@ void timerFunc(int) {
         //   lanterna acesa      -> recua (RETREAT_RATE)
         //   lanterna apagada    -> avanca (caminhada normal)
         //   sprint              -> avanca rapido; a lanterna so' desconta
-        //                          RETREAT_RATE dessa velocidade
+        //                          a forca de recuo dessa velocidade
         float rate;
         if (doorSealed) {
             rate = 0.0f;
         } else {
-            float advance = g_sprinting ? SPRINT_RATE
+            float advance = g_sprinting ? currentSprintRate()
                                         : ADVANCE_RATE_BASE * currentSpeedMultiplier();
-            if (g_flashlightOn) rate = g_sprinting ? (advance - RETREAT_RATE) : -RETREAT_RATE;
+            float retreat = currentRetreatRate();
+            if (g_flashlightOn) rate = g_sprinting ? (advance - retreat) : -retreat;
             else                rate = advance;
         }
         g_monsterT += rate * dt;

@@ -22,6 +22,7 @@ namespace {
     const float UPPER_ARM_LEN = 0.5f;
     const float LOWER_ARM_LEN = 0.5f;
     const float HEAD_RADIUS   = 0.32f;
+    const float JAW_OPEN_MAX_DEG = 42.0f;  // abertura da mandibula com mouthOpen = 1
 
     const float DEG2RAD = 3.14159265f / 180.0f;
 
@@ -109,12 +110,30 @@ void draw(const Vector3& position, float facingYawDeg, float walkTime, float mou
             glTranslatef(0.0f, SHOULDER_Y + HEAD_RADIUS * 0.9f, 0.0f);
             glutSolidSphere(HEAD_RADIUS, 16, 12);
 
-            // Mandibula: gira para baixo/frente conforme mouthOpen
+            // ATENCAO: o monstro olha para -Z no referencial local, entao a
+            // FRENTE do rosto e' -Z (o +Z e' a nuca).
+
+            // Interior da boca: caixa escura cuja ALTURA acompanha a abertura
+            // (fechada = so' um risco fino, a linha da boca). Ela cresce
+            // para baixo a partir do labio superior, preenchendo o vao
+            // que a mandibula deixa ao descer.
+            float gap = HEAD_RADIUS * (0.02f + 0.42f * mouthOpen);
+            glColor3f(0.04f, 0.0f, 0.0f);
             glPushMatrix();
-                glTranslatef(0.0f, -HEAD_RADIUS * 0.35f, HEAD_RADIUS * 0.55f);
-                glRotatef(mouthOpen * 55.0f, 1.0f, 0.0f, 0.0f);
-                glTranslatef(0.0f, -HEAD_RADIUS * 0.3f, HEAD_RADIUS * 0.1f);
-                glScalef(HEAD_RADIUS * 1.3f, HEAD_RADIUS * 0.5f, HEAD_RADIUS * 0.9f);
+                glTranslatef(0.0f, -HEAD_RADIUS * 0.40f - gap * 0.5f, -HEAD_RADIUS * 0.75f);
+                glScalef(HEAD_RADIUS * 0.95f, gap, HEAD_RADIUS * 0.6f);
+                glutSolidCube(1.0);
+            glPopMatrix();
+            setMonsterMaterial();
+
+            // Mandibula: dobradica embaixo/atras do rosto; o queixo se
+            // estende para frente (-Z) e desce conforme mouthOpen. Girar
+            // em X com angulo NEGATIVO leva o que esta' em -Z para baixo.
+            glPushMatrix();
+                glTranslatef(0.0f, -HEAD_RADIUS * 0.45f, -HEAD_RADIUS * 0.15f); // dobradica
+                glRotatef(-mouthOpen * JAW_OPEN_MAX_DEG, 1.0f, 0.0f, 0.0f);
+                glTranslatef(0.0f, -HEAD_RADIUS * 0.12f, -HEAD_RADIUS * 0.45f); // centro do queixo
+                glScalef(HEAD_RADIUS * 1.1f, HEAD_RADIUS * 0.24f, HEAD_RADIUS * 1.0f);
                 glutSolidCube(1.0);
             glPopMatrix();
         glPopMatrix();
