@@ -21,7 +21,8 @@ ifeq ($(OS),Windows_NT)
     CXX  := C:/msys64/mingw64/bin/g++.exe
     LIBS := -lfreeglut -lopengl32 -lglu32
     BIN  := quarto_do_vigia.exe
-    RM   := rm -f
+    RM   := del /Q
+    FIXPATH = $(subst /,\,$1)
 else
     CXX := g++
     UNAME_S := $(shell uname -s)
@@ -32,6 +33,7 @@ else
     endif
     BIN := quarto_do_vigia
     RM  := rm -f
+    FIXPATH = $1
 endif
 
 all: $(BIN)
@@ -43,6 +45,6 @@ $(BIN): $(OBJS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	$(RM) $(OBJS) $(BIN)
+	$(RM) $(call FIXPATH, $(OBJS) $(BIN))
 
 .PHONY: all clean
