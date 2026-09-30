@@ -2,29 +2,19 @@
 #define LIGHTING_H
 
 // ============================================================
-// [Requisito D] Iluminacao e Materiais
-// Praticamente o mesmo esquema da pratica de iluminacao da
-// disciplina: luz ambiente global + uma luz (GL_LIGHT0), materiais
-// via GL_COLOR_MATERIAL. A unica diferenca e' que aqui a posicao da
-// luz e' atualizada a cada frame para acompanhar a camera (efeito
-// de lanterna/tocha que anda junto com o vigia).
+// [Requisito 6] Iluminacao
+// Luz ambiente global fraca + uma luz pontual (GL_LIGHT0) que faz o
+// papel de lanterna. A cor de cada objeto vem de glColor(), porque
+// GL_COLOR_MATERIAL esta' ligado (glColor vira o material).
 // ============================================================
 
-// Configura luz ambiente global e os parametros base da lanterna.
+// Configura a luz ambiente e os parametros da lanterna. Chamar uma vez.
 void initLighting();
 
-// Atualiza a posicao da lanterna a cada frame. Deve ser chamada logo
-// apos gluLookAt() e ANTES de desenhar a cena: nesse ponto a matriz
-// MODELVIEW e' exatamente a transformacao camera->mundo, entao (0,0,0)
-// e' a propria posicao da camera -- a luz "gruda" na camera de graca.
-void updateFlashlight(bool flashlightOn);
-
-// Cada funcao abaixo so' troca a cor "corrente" (glColor); como
-// GL_COLOR_MATERIAL esta' habilitado, isso e' o suficiente pra mudar
-// o material usado na iluminacao dos proximos objetos desenhados.
-void setRoomMaterial();
-void setCorridorMaterial();
-void setMonsterMaterial();
-void setDoorMaterial();
+// Liga/desliga a lanterna e a coloca na posicao da camera. Deve ser
+// chamada logo depois do gluLookAt() e antes de desenhar a cena: a
+// posicao de uma luz e' transformada pela matriz MODELVIEW atual, e
+// nesse ponto (0,0,0) e' o proprio olho da camera.
+void updateFlashlight(bool on);
 
 #endif // LIGHTING_H

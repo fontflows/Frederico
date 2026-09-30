@@ -1,5 +1,4 @@
 #include "enemy.h"
-#include "lighting.h"
 #include "scene_builder.h"
 
 #include <cmath>
@@ -11,112 +10,90 @@
 #endif
 
 namespace {
-    // Dimensoes do corpo (metros aproximados)
-    const float UPPER_LEG_LEN = 0.55f;
-    const float LOWER_LEG_LEN = 0.55f;
-    const float HIP_Y         = UPPER_LEG_LEN + LOWER_LEG_LEN;      // altura do quadril
-    const float TORSO_HEIGHT  = 1.15f;
-    const float TORSO_WIDTH   = 0.85f;
-    const float TORSO_DEPTH   = 0.45f;
-    const float SHOULDER_Y    = HIP_Y + TORSO_HEIGHT;               // topo do tronco
-    const float UPPER_ARM_LEN = 0.5f;
-    const float LOWER_ARM_LEN = 0.5f;
-    const float HEAD_RADIUS   = 0.32f;
-    const float JAW_OPEN_MAX_DEG = 42.0f;  // abertura da mandibula com mouthOpen = 1
+    // Medidas do corpo (aproximadamente em metros).
+    const float LEG_LEN      = 0.55f;                 // coxa e canela
+    const float ARM_LEN      = 0.50f;                 // braco e antebraco
+    const float HIP_Y        = 2.0f * LEG_LEN;        // altura do quadril
+    const float TORSO_HEIGHT = 1.15f;
+    const float TORSO_WIDTH  = 0.85f;
+    const float TORSO_DEPTH  = 0.45f;
+    const float SHOULDER_Y   = HIP_Y + TORSO_HEIGHT;  // topo do tronco
+    const float HEAD_RADIUS  = 0.32f;
+    const float JAW_OPEN_MAX_DEG = 42.0f;             // abertura da mandibula com mouthOpen = 1
 
-    const float DEG2RAD = 3.14159265f / 180.0f;
-
-    // Desenha um segmento de membro (cubo alongado) "pendurado" a
-    // partir da origem corrente da matriz, estendendo-se para -Y.
-    void drawLimbSegment(float length, float thickness) {
+    // Um segmento de membro: cubo esticado, "pendurado" a partir da
+    // origem atual e estendendo-se para baixo (-Y).
+    void drawSegment(float length, float thickness) {
         glPushMatrix();
             glTranslatef(0.0f, -length * 0.5f, 0.0f);
-            glPushMatrix();
-                glScalef(thickness, length, thickness);
-                glutSolidCube(1.0);
-            glPopMatrix();
+            glScalef(thickness, length, thickness);
+            glutSolidCube(1.0);
         glPopMatrix();
     }
 
-    // Uma perna completa: quadril -> coxa -> joelho -> canela.
-    // hipSwingDeg / kneeBendDeg controlam a caminhada mecanica.
-    void drawLeg(float hipOffsetX, float hipSwingDeg, float kneeBendDeg) {
+    // Um membro de 2 segmentos (perna = coxa + canela, braco = braco + antebraco).
+    // E' aqui que esta' a HIERARQUIA: depois de desenhar o 1o segmento,
+    // andamos ate' a ponta dele e giramos a articulacao (joelho/cotovelo);
+    // o 2o segmento herda tudo que foi feito antes, entao acompanha o 1o.
+    void drawLimb(float x, float y, float swingDeg, float bendDeg,
+                  float length, float thickness) {
         glPushMatrix();
-            glTranslatef(hipOffsetX, HIP_Y, 0.0f);
-            glRotatef(hipSwingDeg, 1.0f, 0.0f, 0.0f);       // balanco da coxa (frente/tras)
-            drawLimbSegment(UPPER_LEG_LEN, 0.30f);
+            glTranslatef(x, y, 0.0f);                 // articulacao (quadril / ombro)
+            glRotatef(swingDeg, 1.0f, 0.0f, 0.0f);    // balanco pra frente e pra tras
+            drawSegment(length, thickness);
 
-            glTranslatef(0.0f, -UPPER_LEG_LEN, 0.0f);       // desce ate o joelho
-            glRotatef(kneeBendDeg, 1.0f, 0.0f, 0.0f);        // dobra do joelho (so' para frente)
-            drawLimbSegment(LOWER_LEG_LEN, 0.25f);
+            glTranslatef(0.0f, -length, 0.0f);        // desce ate' a articulacao seguinte
+            glRotatef(bendDeg, 1.0f, 0.0f, 0.0f);     // dobra do joelho / cotovelo
+            drawSegment(length, thickness * 0.85f);
         glPopMatrix();
     }
 
-    // Um braco completo: ombro -> braco -> cotovelo -> antebraco.
-    void drawArm(float shoulderOffsetX, float shoulderSwingDeg, float elbowBendDeg) {
-        glPushMatrix();
-            glTranslatef(shoulderOffsetX, SHOULDER_Y - 0.1f, 0.0f);
-            glRotatef(shoulderSwingDeg, 1.0f, 0.0f, 0.0f);
-            drawLimbSegment(UPPER_ARM_LEN, 0.24f);
-
-            glTranslatef(0.0f, -UPPER_ARM_LEN, 0.0f);
-            glRotatef(elbowBendDeg, 1.0f, 0.0f, 0.0f);
-            drawLimbSegment(LOWER_ARM_LEN, 0.20f);
-        glPopMatrix();
-    }
+    void setMonsterColor() { glColor3f(0.55f, 0.08f, 0.07f); } // vermelho ferrugem
 }
 
 namespace Enemy {
 
 BezierPath getPath() {
     BezierPath path;
-    // P0: ponto de spawn, no fundo do corredor.
-    path.p0 = Vector3(0.6f,  0.0f, Scene::CORRIDOR_FAR_Z);
-    // P1, P2: pontos intermediarios fora do eixo central, criando o
-    // movimento "serpenteante" (zig-zag) ao longo do corredor.
-    path.p1 = Vector3(-1.1f, 0.0f, Scene::CORRIDOR_FAR_Z * 0.66f);
-    path.p2 = Vector3(1.1f,  0.0f, Scene::CORRIDOR_FAR_Z * 0.28f);
-    // P3: entrada da sala (abertura), de onde o jumpscare comeca.
-    path.p3 = Vector3(0.0f,  0.0f, Scene::ROOM_FRONT_Z + 0.3f);
+    path.p0 = Vector3( 0.6f, 0.0f, Scene::CORRIDOR_FAR_Z);         // inicio: fundo do corredor
+    path.p1 = Vector3(-1.1f, 0.0f, Scene::CORRIDOR_FAR_Z * 0.66f); // p1 e p2 ficam fora do eixo central e
+    path.p2 = Vector3( 1.1f, 0.0f, Scene::CORRIDOR_FAR_Z * 0.28f); // fazem a curva serpentear (zig-zag)
+    path.p3 = Vector3( 0.0f, 0.0f, Scene::ROOM_FRONT_Z + 0.3f);    // fim: a porta da sala
     return path;
 }
 
 void draw(const Vector3& position, float facingYawDeg, float walkTime, float mouthOpen) {
-    setMonsterMaterial();
+    setMonsterColor();
 
-    // Caminhada mecanica: pernas/bracos em contra-fase, como pedido no
-    // enunciado (senoides simples aplicadas em glRotatef).
-    float legSwing = 28.0f * sinf(walkTime * 3.2f);
-    float kneeBend = 18.0f * (0.5f + 0.5f * sinf(walkTime * 3.2f + 1.2f)); // so' dobra p/ frente
-    float armSwing = 22.0f * sinf(walkTime * 3.2f + 3.14159f); // bracos opostos as pernas
-    float bodySway = 4.0f  * sinf(walkTime * 1.6f);            // balanco sinistro do tronco
+    // Caminhada: senoides do tempo aplicadas nos angulos das articulacoes.
+    // Pernas e bracos balancam em sentidos opostos.
+    float s    = sinf(walkTime * 3.2f);
+    float leg  = 28.0f * s;
+    float knee = 18.0f * (0.5f + 0.5f * sinf(walkTime * 3.2f + 1.2f)); // so' dobra pra frente
+    float arm  = -22.0f * s;
 
     glPushMatrix();
+        // Raiz da hierarquia: tudo abaixo e' desenhado relativo ao monstro.
         glTranslatef(position.x, position.y, position.z);
         glRotatef(facingYawDeg, 0.0f, 1.0f, 0.0f);
-        glRotatef(bodySway, 0.0f, 0.0f, 1.0f); // leve inclinacao lateral, "serpenteante"
 
         // --- Tronco ---
         glPushMatrix();
             glTranslatef(0.0f, HIP_Y + TORSO_HEIGHT * 0.5f, 0.0f);
-            glPushMatrix();
-                glScalef(TORSO_WIDTH, TORSO_HEIGHT, TORSO_DEPTH);
-                glutSolidCube(1.0);
-            glPopMatrix();
+            glScalef(TORSO_WIDTH, TORSO_HEIGHT, TORSO_DEPTH);
+            glutSolidCube(1.0);
         glPopMatrix();
 
-        // --- Cabeca + mandibula (jumpscare abre a boca) ---
+        // --- Cabeca + mandibula ---
         glPushMatrix();
             glTranslatef(0.0f, SHOULDER_Y + HEAD_RADIUS * 0.9f, 0.0f);
             glutSolidSphere(HEAD_RADIUS, 16, 12);
 
-            // ATENCAO: o monstro olha para -Z no referencial local, entao a
+            // ATENCAO: o monstro olha pra -Z no referencial local, entao a
             // FRENTE do rosto e' -Z (o +Z e' a nuca).
 
-            // Interior da boca: caixa escura cuja ALTURA acompanha a abertura
-            // (fechada = so' um risco fino, a linha da boca). Ela cresce
-            // para baixo a partir do labio superior, preenchendo o vao
-            // que a mandibula deixa ao descer.
+            // Interior da boca: caixa escura cuja altura acompanha a
+            // abertura (fechada = so' um risco fino, a linha da boca).
             float gap = HEAD_RADIUS * (0.02f + 0.42f * mouthOpen);
             glColor3f(0.04f, 0.0f, 0.0f);
             glPushMatrix();
@@ -124,11 +101,11 @@ void draw(const Vector3& position, float facingYawDeg, float walkTime, float mou
                 glScalef(HEAD_RADIUS * 0.95f, gap, HEAD_RADIUS * 0.6f);
                 glutSolidCube(1.0);
             glPopMatrix();
-            setMonsterMaterial();
+            setMonsterColor();
 
-            // Mandibula: dobradica embaixo/atras do rosto; o queixo se
-            // estende para frente (-Z) e desce conforme mouthOpen. Girar
-            // em X com angulo NEGATIVO leva o que esta' em -Z para baixo.
+            // Mandibula: a dobradica fica embaixo/atras do rosto e o queixo
+            // se estende pra frente (-Z). Girar em X com angulo NEGATIVO
+            // leva o que esta' em -Z pra baixo, abrindo a boca.
             glPushMatrix();
                 glTranslatef(0.0f, -HEAD_RADIUS * 0.45f, -HEAD_RADIUS * 0.15f); // dobradica
                 glRotatef(-mouthOpen * JAW_OPEN_MAX_DEG, 1.0f, 0.0f, 0.0f);
@@ -138,14 +115,11 @@ void draw(const Vector3& position, float facingYawDeg, float walkTime, float mou
             glPopMatrix();
         glPopMatrix();
 
-        // --- Pernas (em contra-fase entre si) ---
-        drawLeg(-0.22f,  legSwing, kneeBend);
-        drawLeg( 0.22f, -legSwing, -kneeBend + 36.0f); // fase oposta
-
-        // --- Bracos (em contra-fase com as pernas do mesmo lado) ---
-        drawArm(-TORSO_WIDTH * 0.5f - 0.05f, -armSwing, 15.0f);
-        drawArm( TORSO_WIDTH * 0.5f + 0.05f,  armSwing, 15.0f);
-
+        // --- Pernas (em fases opostas) e bracos ---
+        drawLimb(-0.22f, HIP_Y,  leg, knee,          LEG_LEN, 0.30f);
+        drawLimb( 0.22f, HIP_Y, -leg, -knee + 36.0f, LEG_LEN, 0.30f);
+        drawLimb(-TORSO_WIDTH * 0.5f - 0.05f, SHOULDER_Y - 0.1f, -arm, 15.0f, ARM_LEN, 0.24f);
+        drawLimb( TORSO_WIDTH * 0.5f + 0.05f, SHOULDER_Y - 0.1f,  arm, 15.0f, ARM_LEN, 0.24f);
     glPopMatrix();
 }
 
