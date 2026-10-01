@@ -3,7 +3,7 @@
 
 // ============================================================
 // [Requisito 7] Curvas parametricas (Bezier cubica)
-// Matematica pura, sem OpenGL. Usada para calcular a posicao do
+// Usada para calcular a posicao do
 // monstro no corredor a partir de um parametro t em [0, 1].
 // ============================================================
 
