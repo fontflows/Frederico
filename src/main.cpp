@@ -960,6 +960,7 @@ int main(int argc, char** argv) {
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(g_windowW, g_windowH);
     glutCreateWindow("1 Noite no Frederico");
+    glutFullScreen();
 
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
