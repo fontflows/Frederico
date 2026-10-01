@@ -12,19 +12,45 @@
 
 using namespace Scene;
 
-// Qual luz do OpenGL representa o brilho do monitor. A GL_LIGHT0 e' a
-// lanterna (ver lighting.cpp). Se a GL_LIGHT1 ja' estiver em uso em
-// outro lugar, troque aqui por GL_LIGHT2.
-static const GLenum MONITOR_LIGHT = GL_LIGHT1;
+// ===============================================================
+// CONFIGURACAO
+// ===============================================================
 
-// ---------------------------------------------------------------
-// Helpers de desenho
-// ---------------------------------------------------------------
+// Luzes do OpenGL usadas aqui. A GL_LIGHT0 e' a lanterna (lighting.cpp).
+// Se alguma das outras ja' estiver em uso, troque por GL_LIGHT4, 5...
+static const GLenum MONITOR_LIGHT    = GL_LIGHT1;
+static const GLenum CORRIDOR_LIGHT_A = GL_LIGHT2;
+static const GLenum CORRIDOR_LIGHT_B = GL_LIGHT3;
 
-// Helper: um quad generico com normal explicita (evita repetir os 4
-// glVertex3f + glNormal3f em toda parede/piso). A NORMAL e' o vetor
-// perpendicular a' superficie; a iluminacao usa ela pra saber o quanto
-// a face esta' virada pra luz.
+// Forca das lampadas do corredor (0 = apagadas, so' os suportes ficam).
+// Com 0.5 elas deixam o corredor so' "entrevisto" quando piscam; aumentar
+// deixa o jogo mais facil (da' pra ver o monstro sem lanterna).
+static const float CORRIDOR_LIGHT_LEVEL = 0.5f;
+
+// Altura da faixa de azulejo ("lambril") nas paredes.
+static const float WAINSCOT_H = 1.1f;
+
+// Posicao da cabeca do jogador no eixo Z: tem que ser igual a g_eye.z
+// da main.cpp (ROOM_BACK_Z - 1.0). Usada pra colocar a mesa na frente dele.
+static const float PLAYER_EYE_Z = ROOM_BACK_Z - 1.0f;
+
+// Paleta (R,G,B)
+static const float C_FLOOR_A[3]   = { 0.34f, 0.34f, 0.30f }; // ladrilho claro encardido
+static const float C_FLOOR_B[3]   = { 0.07f, 0.07f, 0.08f }; // ladrilho preto
+static const float C_ROOM_LOW[3]  = { 0.14f, 0.22f, 0.20f }; // azulejo verde-azulado
+static const float C_ROOM_HIGH[3] = { 0.34f, 0.33f, 0.28f }; // tinta creme suja
+static const float C_CEIL[3]      = { 0.20f, 0.20f, 0.19f };
+static const float C_CONCRETE[3]  = { 0.22f, 0.22f, 0.21f }; // piso do corredor
+static const float C_COR_LOW[3]   = { 0.11f, 0.20f, 0.18f };
+static const float C_COR_HIGH[3]  = { 0.20f, 0.20f, 0.19f };
+
+// ===============================================================
+// HELPERS DE DESENHO
+// ===============================================================
+
+// Um quad com normal explicita. A NORMAL e' o vetor perpendicular a'
+// superficie; a iluminacao usa ela pra saber o quanto a face esta'
+// virada pra luz.
 static void quad(const Vector3& a, const Vector3& b, const Vector3& c, const Vector3& d,
                   const Vector3& normal) {
     glNormal3f(normal.x, normal.y, normal.z);
@@ -36,8 +62,8 @@ static void quad(const Vector3& a, const Vector3& b, const Vector3& c, const Vec
 
 // Define a "tinta" do proximo objeto: cor difusa+ambiente, sem brilho
 // especular e sem emissao (o objeto so' aparece quando alguma luz bate
-// nele). Chama tambem glColor porque, se o projeto usar
-// glColorMaterial, e' o glColor que manda no material.
+// nele). Chama tambem glColor porque, se o projeto usar glColorMaterial,
+// e' o glColor que manda no material.
 static void setPaint(float r, float g, float b) {
     const GLfloat c[]   = { r, g, b, 1.0f };
     const GLfloat off[] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -47,10 +73,44 @@ static void setPaint(float r, float g, float b) {
     glColor3f(r, g, b);
 }
 
+// So' troca a cor (sem mexer em especular/emissao). Pode ser chamada
+// dentro de glBegin/glEnd, entao serve pra pintar ladrilho por ladrilho.
+static void tint(float r, float g, float b) {
+    const GLfloat c[] = { r, g, b, 1.0f };
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, c);
+    glColor3f(r, g, b);
+}
+
+// Reflexo (brilho especular) do material atual: serve pro metal.
+// Chamar DEPOIS do setPaint (que zera o brilho) e zerar no fim.
+static void shiny(float spec, float exponent) {
+    const GLfloat s[] = { spec, spec, spec, 1.0f };
+    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, s);
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, exponent);
+}
+
+// Faz o objeto "brilhar" sozinho (emissao). Zere depois com glowOff().
+static void glowOn(float r, float g, float b) {
+    const GLfloat e[] = { r, g, b, 1.0f };
+    glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, e);
+}
+static void glowOff() { glowOn(0.0f, 0.0f, 0.0f); }
+
+// Numero pseudo-aleatorio fixo em [0,1] a partir de dois inteiros (hash).
+// Sempre devolve o mesmo valor pro mesmo (i,j), entao a "sujeira" de cada
+// ladrilho e' estavel entre frames, sem precisar guardar nada.
+static float hash2(int i, int j) {
+    unsigned int n = (unsigned int)i * 73856093u ^ (unsigned int)j * 19349663u;
+    n = (n << 13) ^ n;
+    n = n * (n * n * 15731u + 789221u) + 1376312589u;
+    return (float)(n & 0x7fffffffu) / 2147483647.0f;
+}
+
+static float lenOf(const Vector3& a) { return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z); }
+
 // Caixa (paralelepipedo) centrada em (cx,cy,cz) com dimensoes
-// (sx,sy,sz). E' um cubo unitario do GLUT esticado por glScalef e
-// movido por glTranslatef: com esse unico helper montamos mesa,
-// armario, monitor, teclado etc.
+// (sx,sy,sz): um cubo unitario do GLUT esticado por glScalef e movido
+// por glTranslatef. Com esse helper montamos quase todos os objetos.
 static void box(float cx, float cy, float cz, float sx, float sy, float sz) {
     glPushMatrix();
         glTranslatef(cx, cy, cz);
@@ -59,8 +119,7 @@ static void box(float cx, float cy, float cz, float sx, float sy, float sz) {
     glPopMatrix();
 }
 
-// Disco (circulo preenchido) no plano XY, virado pra +Z, em (cx,cy,z).
-// Leque de triangulos: um vertice no centro e os demais na borda.
+// Disco no plano XY, virado pra +Z, em (cx,cy,z) (leque de triangulos).
 static void disc(float cx, float cy, float z, float radius) {
     const int N = 24;
     glNormal3f(0.0f, 0.0f, 1.0f);
@@ -73,131 +132,270 @@ static void disc(float cx, float cy, float z, float radius) {
     glEnd();
 }
 
-// ---------------------------------------------------------------
-// Estrutura da sala
-// ---------------------------------------------------------------
-void drawSecurityRoom() {
-    setRoomMaterial();
-    glBegin(GL_QUADS);
-
-    // --- Chao (normal para cima) ---
-    quad(Vector3(-ROOM_HALF_WIDTH, 0, ROOM_FRONT_Z),
-         Vector3( ROOM_HALF_WIDTH, 0, ROOM_FRONT_Z),
-         Vector3( ROOM_HALF_WIDTH, 0, ROOM_BACK_Z),
-         Vector3(-ROOM_HALF_WIDTH, 0, ROOM_BACK_Z),
-         Vector3(0, 1, 0));
-
-    // --- Teto (normal para baixo) ---
-    quad(Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3( ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3( ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(0, -1, 0));
-
-    // --- Parede de tras (onde o vigia fica encostado; normal para -Z) ---
-    quad(Vector3(-ROOM_HALF_WIDTH, 0,           ROOM_BACK_Z),
-         Vector3( ROOM_HALF_WIDTH, 0,           ROOM_BACK_Z),
-         Vector3( ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3(0, 0, -1));
-
-    // --- Parede esquerda (normal para +X, apontando para dentro da sala) ---
-    quad(Vector3(-ROOM_HALF_WIDTH, 0,           ROOM_BACK_Z),
-         Vector3(-ROOM_HALF_WIDTH, 0,           ROOM_FRONT_Z),
-         Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3(1, 0, 0));
-
-    // --- Parede direita (normal para -X) ---
-    quad(Vector3(ROOM_HALF_WIDTH, 0,           ROOM_FRONT_Z),
-         Vector3(ROOM_HALF_WIDTH, 0,           ROOM_BACK_Z),
-         Vector3(ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_BACK_Z),
-         Vector3(ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(-1, 0, 0));
-
-    // --- Parede frontal, EM DUAS COLUNAS + LINTEL, deixando a abertura
-    //     central livre para o corredor (a "janela do vigia") ---
-    // Coluna esquerda da parede frontal
-    quad(Vector3(-ROOM_HALF_WIDTH, 0,           ROOM_FRONT_Z),
-         Vector3(-DOORWAY_HALF_W, 0,           ROOM_FRONT_Z),
-         Vector3(-DOORWAY_HALF_W, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(0, 0, 1));
-    // Coluna direita da parede frontal
-    quad(Vector3(DOORWAY_HALF_W,  0,           ROOM_FRONT_Z),
-         Vector3(ROOM_HALF_WIDTH, 0,           ROOM_FRONT_Z),
-         Vector3(ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(DOORWAY_HALF_W,  ROOM_HEIGHT, ROOM_FRONT_Z),
-         Vector3(0, 0, 1));
-    // Lintel acima da abertura
-    quad(Vector3(-DOORWAY_HALF_W, DOORWAY_HEIGHT, ROOM_FRONT_Z),
-         Vector3( DOORWAY_HALF_W, DOORWAY_HEIGHT, ROOM_FRONT_Z),
-         Vector3( DOORWAY_HALF_W, ROOM_HEIGHT,    ROOM_FRONT_Z),
-         Vector3(-DOORWAY_HALF_W, ROOM_HEIGHT,    ROOM_FRONT_Z),
-         Vector3(0, 0, 1));
-
+// Cilindro em pe: base em y=0, topo em y=height. Os lados usam normais
+// radiais (apontando pra fora), o que da' o sombreamento arredondado.
+static void cylinderY(float radius, float height, int n) {
+    glBegin(GL_QUAD_STRIP);
+        for (int i = 0; i <= n; ++i) {
+            float a = 6.2831853f * (float)i / (float)n;
+            float c = cosf(a), s = sinf(a);
+            glNormal3f(c, 0.0f, s);
+            glVertex3f(radius * c, 0.0f,   radius * s);
+            glVertex3f(radius * c, height, radius * s);
+        }
+    glEnd();
+    glNormal3f(0.0f, 1.0f, 0.0f);
+    glBegin(GL_TRIANGLE_FAN);
+        glVertex3f(0.0f, height, 0.0f);
+        for (int i = 0; i <= n; ++i) {
+            float a = 6.2831853f * (float)i / (float)n;
+            glVertex3f(radius * cosf(a), height, radius * sinf(a));
+        }
     glEnd();
 }
 
-void drawCorridor() {
-    setCorridorMaterial();
+// Cilindro deitado ao longo do corredor: comeca em (x,y,z0) e segue
+// "len" metros em direcao a -Z (o fundo do corredor). E' o cilindro em
+// pe girado -90 graus em X. Usado nos canos.
+static void cylinderZ(float x, float y, float z0, float len, float radius) {
+    glPushMatrix();
+        glTranslatef(x, y, z0);
+        glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);
+        cylinderY(radius, len, 14);
+    glPopMatrix();
+}
+
+// Superficie plana (parede, piso, teto) SUBDIVIDIDA em varias celulas.
+//   p = canto de origem; u e v = vetores das duas arestas (comprimento total)
+//   n = normal; cell = tamanho aproximado de cada celula
+//   c1 / c2 = cores; se c2 != 0 as celulas alternam (xadrez)
+//   variation = quanto o brilho de cada celula varia ao acaso (sujeira)
+// POR QUE subdividir? O OpenGL classico calcula a luz so' nos VERTICES e
+// interpola o resultado. Um quad gigante tem so' 4 vertices, entao a
+// lanterna quase nao apareceria nele. Com varias celulas, a luz "cai"
+// de forma localizada (mancha de luz) e o piso/parede ganha textura.
+static void gridWall(const Vector3& p, const Vector3& u, const Vector3& v, const Vector3& n,
+                     float cell, const float* c1, const float* c2, float variation, int seed) {
+    int nu = (int)(lenOf(u) / cell + 0.5f); if (nu < 1) nu = 1;
+    int nv = (int)(lenOf(v) / cell + 0.5f); if (nv < 1) nv = 1;
+    setPaint(c1[0], c1[1], c1[2]);
     glBegin(GL_QUADS);
-
-    // --- Chao do corredor ---
-    quad(Vector3(-CORRIDOR_HALF_W, 0, CORRIDOR_FAR_Z),
-         Vector3( CORRIDOR_HALF_W, 0, CORRIDOR_FAR_Z),
-         Vector3( CORRIDOR_HALF_W, 0, ROOM_FRONT_Z),
-         Vector3(-CORRIDOR_HALF_W, 0, ROOM_FRONT_Z),
-         Vector3(0, 1, 0));
-
-    // --- Teto do corredor ---
-    quad(Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z),
-         Vector3( CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z),
-         Vector3( CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(0, -1, 0));
-
-    // --- Parede esquerda do corredor ---
-    quad(Vector3(-CORRIDOR_HALF_W, 0,               ROOM_FRONT_Z),
-         Vector3(-CORRIDOR_HALF_W, 0,               CORRIDOR_FAR_Z),
-         Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z),
-         Vector3(1, 0, 0));
-
-    // --- Parede direita do corredor ---
-    quad(Vector3(CORRIDOR_HALF_W, 0,               CORRIDOR_FAR_Z),
-         Vector3(CORRIDOR_HALF_W, 0,               ROOM_FRONT_Z),
-         Vector3(CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z),
-         Vector3(CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(-1, 0, 0));
-
-    // --- Parede de fundo do corredor (de onde o monstro "surge") ---
-    quad(Vector3(-CORRIDOR_HALF_W, 0,               CORRIDOR_FAR_Z),
-         Vector3( CORRIDOR_HALF_W, 0,               CORRIDOR_FAR_Z),
-         Vector3( CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, CORRIDOR_FAR_Z),
-         Vector3(0, 0, 1));
-
+    for (int j = 0; j < nv; ++j) {
+        for (int i = 0; i < nu; ++i) {
+            const float* c = (c2 && ((i + j) & 1)) ? c2 : c1;
+            float f = 1.0f - variation * hash2(i + seed * 131, j + seed * 71);
+            tint(c[0] * f, c[1] * f, c[2] * f);
+            float u0 = (float)i / nu, u1 = (float)(i + 1) / nu;
+            float v0 = (float)j / nv, v1 = (float)(j + 1) / nv;
+            quad(p + u * u0 + v * v0, p + u * u1 + v * v0,
+                 p + u * u1 + v * v1, p + u * u0 + v * v1, n);
+        }
+    }
     glEnd();
+}
+
+// Parede em duas faixas: azulejo embaixo (ate' WAINSCOT_H) e tinta em cima.
+static void wallBands(const Vector3& p0, const Vector3& u, const Vector3& n, float h,
+                      const float* low, const float* high, int seed) {
+    gridWall(p0, u, Vector3(0.0f, WAINSCOT_H, 0.0f), n, 0.5f, low, 0, 0.35f, seed);
+    gridWall(p0 + Vector3(0.0f, WAINSCOT_H, 0.0f), u, Vector3(0.0f, h - WAINSCOT_H, 0.0f),
+             n, 1.0f, high, 0, 0.25f, seed + 1);
+}
+
+// ===============================================================
+// ESTRUTURA: SALA, CORREDOR, PORTA
+// ===============================================================
+
+void drawSecurityRoom() {
+    const float depth = ROOM_BACK_Z - ROOM_FRONT_Z;
+    const float W2    = 2.0f * ROOM_HALF_WIDTH;
+
+    // Piso de ladrilhos xadrez (claro/escuro), cada um com sujeira propria.
+    gridWall(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
+             Vector3(0.0f, 0.0f, depth), Vector3(0.0f, 1.0f, 0.0f),
+             0.5f, C_FLOOR_A, C_FLOOR_B, 0.45f, 11);
+
+    // Teto
+    gridWall(Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
+             Vector3(0.0f, 0.0f, depth), Vector3(0.0f, -1.0f, 0.0f),
+             1.0f, C_CEIL, 0, 0.20f, 12);
+
+    // Parede de tras (normal -Z)
+    wallBands(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_BACK_Z), Vector3(W2, 0.0f, 0.0f),
+              Vector3(0.0f, 0.0f, -1.0f), ROOM_HEIGHT, C_ROOM_LOW, C_ROOM_HIGH, 21);
+
+    // Parede esquerda (normal +X) e direita (normal -X)
+    wallBands(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_FRONT_Z), Vector3(0.0f, 0.0f, depth),
+              Vector3(1.0f, 0.0f, 0.0f), ROOM_HEIGHT, C_ROOM_LOW, C_ROOM_HIGH, 31);
+    wallBands(Vector3(ROOM_HALF_WIDTH, 0.0f, ROOM_FRONT_Z), Vector3(0.0f, 0.0f, depth),
+              Vector3(-1.0f, 0.0f, 0.0f), ROOM_HEIGHT, C_ROOM_LOW, C_ROOM_HIGH, 41);
+
+    // Parede frontal: duas colunas + lintel deixando a abertura livre
+    wallBands(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_FRONT_Z),
+              Vector3(ROOM_HALF_WIDTH - DOORWAY_HALF_W, 0.0f, 0.0f),
+              Vector3(0.0f, 0.0f, 1.0f), ROOM_HEIGHT, C_ROOM_LOW, C_ROOM_HIGH, 51);
+    wallBands(Vector3(DOORWAY_HALF_W, 0.0f, ROOM_FRONT_Z),
+              Vector3(ROOM_HALF_WIDTH - DOORWAY_HALF_W, 0.0f, 0.0f),
+              Vector3(0.0f, 0.0f, 1.0f), ROOM_HEIGHT, C_ROOM_LOW, C_ROOM_HIGH, 61);
+    gridWall(Vector3(-DOORWAY_HALF_W, DOORWAY_HEIGHT, ROOM_FRONT_Z),
+             Vector3(2.0f * DOORWAY_HALF_W, 0.0f, 0.0f),
+             Vector3(0.0f, ROOM_HEIGHT - DOORWAY_HEIGHT, 0.0f),
+             Vector3(0.0f, 0.0f, 1.0f), 1.0f, C_ROOM_HIGH, 0, 0.25f, 71);
+}
+
+void drawCorridor() {
+    const float L  = ROOM_FRONT_Z - CORRIDOR_FAR_Z;   // comprimento do corredor
+    const float W2 = 2.0f * CORRIDOR_HALF_W;
+
+    // Piso de concreto sujo, em lajes de 1 m
+    gridWall(Vector3(-CORRIDOR_HALF_W, 0.0f, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
+             Vector3(0.0f, 0.0f, -L), Vector3(0.0f, 1.0f, 0.0f),
+             1.0f, C_CONCRETE, 0, 0.55f, 81);
+
+    // Faixas amarelas de seguranca, tracejadas, nas duas bordas do piso
+    setPaint(0.50f, 0.42f, 0.07f);
+    glBegin(GL_QUADS);
+    for (int side = -1; side <= 1; side += 2) {
+        float x = side * (CORRIDOR_HALF_W - 0.22f);
+        for (float d = 0.0f; d + 1.0f <= L; d += 2.0f) {
+            float f = 0.6f + 0.4f * hash2((int)d, side + 5);   // faixas gastas
+            tint(0.50f * f, 0.42f * f, 0.07f * f);
+            float z0 = ROOM_FRONT_Z - d, z1 = ROOM_FRONT_Z - d - 1.0f;
+            quad(Vector3(x - 0.04f, 0.003f, z0), Vector3(x + 0.04f, 0.003f, z0),
+                 Vector3(x + 0.04f, 0.003f, z1), Vector3(x - 0.04f, 0.003f, z1),
+                 Vector3(0.0f, 1.0f, 0.0f));
+        }
+    }
+    glEnd();
+
+    // Teto
+    gridWall(Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
+             Vector3(0.0f, 0.0f, -L), Vector3(0.0f, -1.0f, 0.0f),
+             1.0f, C_CEIL, 0, 0.30f, 82);
+
+    // Paredes laterais e parede de fundo, com azulejo embaixo
+    wallBands(Vector3(-CORRIDOR_HALF_W, 0.0f, ROOM_FRONT_Z), Vector3(0.0f, 0.0f, -L),
+              Vector3(1.0f, 0.0f, 0.0f), CORRIDOR_HEIGHT, C_COR_LOW, C_COR_HIGH, 91);
+    wallBands(Vector3(CORRIDOR_HALF_W, 0.0f, ROOM_FRONT_Z), Vector3(0.0f, 0.0f, -L),
+              Vector3(-1.0f, 0.0f, 0.0f), CORRIDOR_HEIGHT, C_COR_LOW, C_COR_HIGH, 101);
+    wallBands(Vector3(-CORRIDOR_HALF_W, 0.0f, CORRIDOR_FAR_Z), Vector3(W2, 0.0f, 0.0f),
+              Vector3(0.0f, 0.0f, 1.0f), CORRIDOR_HEIGHT, C_COR_LOW, C_COR_HIGH, 111);
+}
+
+// Detalhes da face da frente (+Z) da porta de aco, em coordenadas
+// locais da porta: origem no centro, W = largura, H = altura, face em
+// z = +0.04. Cada camada fica poucos milimetros na frente da anterior.
+static void rivet(float x, float y, float z) {
+    glPushMatrix();
+        glTranslatef(x, y, z);
+        glutSolidSphere(0.013, 6, 5);
+    glPopMatrix();
+}
+
+static void drawDoorDetails(float W, float H) {
+    const float z0 = 0.04f;
+
+    // moldura interna: 4 barras escuras
+    setPaint(0.10f, 0.11f, 0.12f);
+    box(0.0f,  H * 0.5f - 0.03f, z0 + 0.006f, W - 0.06f, 0.04f, 0.012f);
+    box(0.0f, -H * 0.5f + 0.03f, z0 + 0.006f, W - 0.06f, 0.04f, 0.012f);
+    box(-(W * 0.5f - 0.03f), 0.0f, z0 + 0.006f, 0.04f, H - 0.06f, 0.012f);
+    box( (W * 0.5f - 0.03f), 0.0f, z0 + 0.006f, 0.04f, H - 0.06f, 0.012f);
+
+    // dois paineis em relevo (cima e baixo)
+    const float pw = W - 0.30f, ph = H * 0.34f, py = H * 0.24f;
+    setPaint(0.24f, 0.26f, 0.27f);
+    box(0.0f,  py, z0 + 0.008f, pw, ph, 0.016f);
+    box(0.0f, -py, z0 + 0.008f, pw, ph, 0.016f);
+
+    // rebites em volta de cada painel
+    setPaint(0.45f, 0.46f, 0.48f);
+    for (int s = -1; s <= 1; s += 2) {
+        float cy = s * py;
+        for (float x = -pw * 0.5f + 0.06f; x <= pw * 0.5f - 0.05f; x += 0.22f) {
+            rivet(x, cy + ph * 0.5f - 0.04f, z0 + 0.018f);
+            rivet(x, cy - ph * 0.5f + 0.04f, z0 + 0.018f);
+        }
+        for (int k = 1; k < 4; ++k) {
+            float y = cy - ph * 0.5f + ph * (float)k / 4.0f;
+            rivet(-(pw * 0.5f - 0.04f), y, z0 + 0.018f);
+            rivet( (pw * 0.5f - 0.04f), y, z0 + 0.018f);
+        }
+    }
+
+    // roda de trava no centro, tipo escotilha de submarino
+    setPaint(0.40f, 0.42f, 0.45f);
+    shiny(0.7f, 50.0f);
+    glPushMatrix();
+        glTranslatef(0.0f, 0.0f, z0 + 0.035f);
+        glutSolidTorus(0.014, 0.14, 6, 20);                      // aro
+        for (int k = 0; k < 3; ++k) {                            // 3 raios
+            glPushMatrix();
+                glRotatef(60.0f * (float)k, 0.0f, 0.0f, 1.0f);
+                box(0.0f, 0.0f, 0.0f, 0.28f, 0.018f, 0.018f);
+            glPopMatrix();
+        }
+        glutSolidSphere(0.035, 10, 8);                           // cubo central
+        box(0.0f, 0.0f, -0.015f, 0.05f, 0.05f, 0.03f);           // eixo
+    glPopMatrix();
+    shiny(0.0f, 0.0f);
+
+    // faixa de perigo amarela e preta na base
+    int n = (int)(W / 0.12f);
+    for (int k = 0; k < n; ++k) {
+        if (k & 1) setPaint(0.70f, 0.55f, 0.05f); else setPaint(0.04f, 0.04f, 0.04f);
+        box(-W * 0.5f + 0.06f + 0.12f * (float)k, -H * 0.5f + 0.10f, z0 + 0.004f,
+            0.12f, 0.08f, 0.008f);
+    }
+
+    // ferrugem escorrendo de cima dos paineis
+    setPaint(0.30f, 0.12f, 0.04f);
+    for (int k = 0; k < 5; ++k) {
+        float len = 0.25f + 0.12f * (float)(k % 3);
+        box(-0.8f + 0.4f * (float)k, py + ph * 0.5f - len * 0.5f, z0 + 0.018f, 0.03f, len, 0.004f);
+    }
+
+    // marcas de garra: tinta riscada mostrando o metal claro por baixo
+    setPaint(0.72f, 0.72f, 0.74f);
+    for (int k = 0; k < 4; ++k) {
+        glPushMatrix();
+            glTranslatef(0.45f + 0.07f * (float)k, -py, z0 + 0.0185f);
+            glRotatef(18.0f, 0.0f, 0.0f, 1.0f);
+            box(0.0f, 0.0f, 0.0f, 0.014f, 0.50f, 0.004f);
+        glPopMatrix();
+    }
+
+    // sangue escorrido abaixo da roda
+    setPaint(0.30f, 0.00f, 0.01f);
+    box(0.15f, -0.30f, z0 + 0.0185f, 0.045f, 0.34f, 0.004f);
+    box(0.19f, -0.55f, z0 + 0.0185f, 0.020f, 0.30f, 0.004f);
 }
 
 void drawDoor(float doorOffsetY) {
     // A porta e' um bloco de altura fixa (DOORWAY_HEIGHT). A base dela
     // interpola entre "escondida acima do teto" (aberta) e "encostada no
     // chao" (fechada), conforme o progresso do fechamento (0 a 1).
-    setDoorMaterial();
-
     float progresso    = doorOffsetY / DOORWAY_HEIGHT;       // 0 = aberta, 1 = fechada
     float baseAberta   = ROOM_HEIGHT;                        // some acima do teto
     float baseFechada  = 0.0f;                                // encosta no chao
     float base         = baseAberta + (baseFechada - baseAberta) * progresso;
-    float centerY       = base + DOORWAY_HEIGHT * 0.5f;
+    float centerY      = base + DOORWAY_HEIGHT * 0.5f;
 
+    const float W = DOORWAY_HALF_W * 2.0f, H = DOORWAY_HEIGHT;
+
+    glEnable(GL_NORMALIZE); // glScalef nao uniforme: refaz as normais
     glPushMatrix();
         glTranslatef(0.0f, centerY, ROOM_FRONT_Z + 0.02f);
-        glScalef(DOORWAY_HALF_W * 2.0f, DOORWAY_HEIGHT, 0.08f);
-        glutSolidCube(1.0);
+        // Os detalhes sao desenhados no mesmo referencial da laje, entao
+        // acompanham a porta quando ela sobe e desce.
+        setDoorMaterial();
+        glPushMatrix();
+            glScalef(W, H, 0.08f);
+            glutSolidCube(1.0);                               // a laje de aco
+        glPopMatrix();
+        drawDoorDetails(W, H);
     glPopMatrix();
+    glDisable(GL_NORMALIZE);
 }
 
 // ---------------------------------------------------------------
@@ -251,18 +449,16 @@ void drawDoorSwitch(bool doorClosing, bool hasPower) {
 
 // ===============================================================
 // MOVEIS DA SALA
-// Cada movel e' uma funcao separada, montada com box()/disc(). Os
-// moveis grandes (mesa e armario) sao desenhados num sistema de
-// coordenadas LOCAL, girado pra ficar encostado na parede: dentro dele
-// pensamos sempre igual ("+Z e' a frente do movel, +Y e' pra cima") e
-// um unico glTranslatef/glRotatef posiciona o conjunto no mundo. Isso e'
-// a hierarquia de transformacoes: o monitor, o teclado, o ventilador e
-// o poster sao "filhos" da mesa e se movem junto com ela.
+// Os moveis grandes (mesas e armario) sao desenhados num sistema de
+// coordenadas LOCAL: dentro dele pensamos sempre igual ("+Z e' a frente
+// do movel, +Y e' pra cima") e um unico glTranslatef/glRotatef posiciona
+// o conjunto no mundo. Isso e' a hierarquia de transformacoes: monitor,
+// teclado, caneca etc. sao "filhos" da mesa e se movem junto com ela.
 // ===============================================================
 
 // Luz do monitor: uma luz pontual azul-esverdeada, fraca e com
-// atenuacao (some rapido com a distancia), que tremula. Faz a mesa, o
-// poster e a parede ao lado receberem um brilho de tela no escuro.
+// atenuacao (some rapido com a distancia), que tremula. Faz a mesa e o
+// teclado receberem um brilho de tela no escuro.
 // Formula da atenuacao do OpenGL: 1 / (kc + kl*d + kq*d*d).
 // Como o glLight transforma a posicao pela matriz atual, esta funcao
 // deve ser chamada depois do gluLookAt (o display ja faz isso).
@@ -281,15 +477,12 @@ static void setupMonitorLight(float x, float y, float z, float time) {
     glEnable(MONITOR_LIGHT);
 }
 
-// Computador antigo (monitor de tubo + teclado), em coordenadas locais
-// da mesa. A tela e' emissiva e mostra uma "camera de seguranca": um
-// corredor em perspectiva desenhado com linhas, mais um ponto vermelho
-// de gravacao (REC) que pisca.
+// Computador antigo (monitor de tubo + teclado + mouse), na origem do
+// sistema local, com a tela virada pra +Z. A tela e' emissiva e mostra
+// uma "camera de seguranca": um corredor em perspectiva desenhado com
+// linhas, mais um ponto vermelho de gravacao (REC) que pisca.
 static void drawComputer(float time) {
     const float top = 0.75f; // altura do tampo da mesa
-
-    glPushMatrix();
-    glTranslatef(-0.15f, 0.0f, 0.0f); // desloca o computador pro lado esquerdo do tampo
 
     setPaint(0.55f, 0.53f, 0.46f);                          // bege gasto
     box(0.0f, top + 0.015f, -0.08f, 0.26f, 0.03f, 0.22f);   // base
@@ -299,6 +492,7 @@ static void drawComputer(float time) {
 
     setPaint(0.10f, 0.10f, 0.11f);
     box(0.0f, top + 0.015f, 0.22f, 0.42f, 0.03f, 0.14f);    // teclado
+    box(0.30f, top + 0.012f, 0.22f, 0.05f, 0.025f, 0.08f);  // mouse
 
     // --- tela (emissiva: sem iluminacao) ---
     const float sz = 0.052f;                                 // um pouco a' frente do corpo
@@ -346,19 +540,17 @@ static void drawComputer(float time) {
         glEnd();
     }
     glPopAttrib();
-
-    glPopMatrix();
 }
 
-// Ventilador de mesa, em coordenadas locais da mesa. Tem tres niveis
-// de hierarquia, cada um herdando a transformacao do anterior:
+// Ventilador de mesa, na origem do sistema local. Tem tres niveis de
+// hierarquia, cada um herdando a transformacao do anterior:
 //   base -> cabeca (oscila girando em Y) -> helice (gira em Z)
 // As duas rotacoes dependem do tempo, entao o ventilador se mexe sozinho.
 static void drawFan(float time) {
     const float top = 0.75f;
 
     glPushMatrix();
-    glTranslatef(0.55f, top, -0.02f);
+    glTranslatef(0.0f, top, 0.0f);
 
     setPaint(0.55f, 0.60f, 0.66f);
     box(0.0f, 0.015f, 0.0f, 0.17f, 0.03f, 0.17f);  // base
@@ -385,8 +577,97 @@ static void drawFan(float time) {
     glPopMatrix();
 }
 
-// Poster na parede atras da mesa: o mascote sorridente do lugar. Fica
-// no plano z = -0.38 do sistema local da mesa (a parede), com cada
+// Caneca de cafe (cilindro + "cafe" escuro por cima + alca de torus).
+static void drawMug() {
+    glPushMatrix();
+        glTranslatef(0.42f, 0.75f, 0.02f);
+        setPaint(0.75f, 0.72f, 0.65f);
+        cylinderY(0.045f, 0.10f, 16);
+        glTranslatef(0.0f, 0.0985f, 0.0f);
+        setPaint(0.08f, 0.04f, 0.02f);
+        cylinderY(0.040f, 0.003f, 16);             // superficie do cafe
+        glTranslatef(0.05f, -0.0485f, 0.0f);
+        setPaint(0.75f, 0.72f, 0.65f);
+        glutSolidTorus(0.008, 0.030, 6, 12);       // alca
+    glPopMatrix();
+}
+
+// Pilha de papeis levemente girados, com uma mancha vermelha escura.
+static void drawPapers() {
+    glPushMatrix();
+        glTranslatef(0.12f, 0.753f, 0.14f);
+        glRotatef(12.0f, 0.0f, 1.0f, 0.0f);
+        setPaint(0.82f, 0.80f, 0.70f);
+        box(0.0f, 0.0f, 0.0f, 0.21f, 0.004f, 0.30f);
+        glTranslatef(0.03f, 0.004f, -0.02f);
+        glRotatef(-20.0f, 0.0f, 1.0f, 0.0f);
+        box(0.0f, 0.0f, 0.0f, 0.21f, 0.004f, 0.30f);
+        setPaint(0.40f, 0.03f, 0.03f);
+        box(0.04f, 0.0035f, 0.05f, 0.05f, 0.001f, 0.035f);   // mancha
+    glPopMatrix();
+}
+
+// Telefone antigo com um LED de "recado" piscando.
+static void drawPhone(float time) {
+    glPushMatrix();
+        glTranslatef(0.64f, 0.75f, 0.12f);
+        setPaint(0.62f, 0.57f, 0.47f);
+        box(0.0f, 0.03f, 0.0f, 0.20f, 0.06f, 0.18f);          // base
+        box(0.0f, 0.075f, -0.02f, 0.22f, 0.03f, 0.055f);      // fone
+        box(-0.10f, 0.065f, -0.02f, 0.05f, 0.05f, 0.07f);     // ponta do fone
+        box( 0.10f, 0.065f, -0.02f, 0.05f, 0.05f, 0.07f);
+        setPaint(0.10f, 0.10f, 0.10f);
+        box(0.0f, 0.062f, 0.05f, 0.09f, 0.004f, 0.07f);       // disco de discar
+        // LED vermelho (emissivo) piscando. O glowOn vem DEPOIS do
+        // setPaint, porque o setPaint zera a emissao.
+        setPaint(0.5f, 0.05f, 0.05f);
+        if (fmodf(time, 1.0f) < 0.5f) glowOn(1.0f, 0.1f, 0.1f);
+        glPushMatrix();
+            glTranslatef(0.08f, 0.065f, 0.07f);
+            glutSolidSphere(0.012, 8, 6);
+        glPopMatrix();
+        glowOff();
+    glPopMatrix();
+}
+
+// Radio velho com antena e botao (na mesa lateral).
+static void drawRadio() {
+    glPushMatrix();
+        glTranslatef(0.18f, 0.75f, 0.0f);
+        setPaint(0.20f, 0.14f, 0.10f);
+        box(0.0f, 0.08f, 0.0f, 0.30f, 0.16f, 0.10f);
+        setPaint(0.08f, 0.06f, 0.05f);
+        box(-0.05f, 0.08f, 0.052f, 0.14f, 0.11f, 0.004f);     // alto-falante
+        setPaint(0.55f, 0.50f, 0.40f);
+        glPushMatrix();
+            glTranslatef(0.09f, 0.08f, 0.056f);
+            glutSolidSphere(0.022, 10, 8);                    // botao
+        glPopMatrix();
+        setPaint(0.55f, 0.58f, 0.62f);
+        glPushMatrix();
+            glTranslatef(0.12f, 0.16f, -0.02f);
+            glRotatef(-25.0f, 0.0f, 0.0f, 1.0f);              // antena inclinada
+            box(0.0f, 0.17f, 0.0f, 0.008f, 0.34f, 0.008f);
+        glPopMatrix();
+    glPopMatrix();
+}
+
+// Duas caixas de papelao empilhadas e tortas (na mesa lateral).
+static void drawCardboardBoxes() {
+    glPushMatrix();
+        glTranslatef(-0.42f, 0.75f, 0.0f);
+        glRotatef(10.0f, 0.0f, 1.0f, 0.0f);
+        setPaint(0.45f, 0.33f, 0.20f);
+        box(0.0f, 0.10f, 0.0f, 0.30f, 0.20f, 0.25f);
+        glTranslatef(0.0f, 0.20f, 0.0f);
+        glRotatef(-25.0f, 0.0f, 1.0f, 0.0f);
+        setPaint(0.40f, 0.29f, 0.17f);
+        box(0.0f, 0.07f, 0.0f, 0.22f, 0.14f, 0.20f);
+    glPopMatrix();
+}
+
+// Poster na parede atras da mesa lateral: o mascote sorridente do lugar.
+// Fica no plano z = -0.38 do sistema local da mesa (a parede), com cada
 // camada alguns milimetros a' frente da anterior pra evitar o
 // "z-fighting" (duas superficies no mesmo plano brigando por quem
 // aparece).
@@ -430,25 +711,62 @@ static void drawPoster() {
     box(0.0f, cy - 0.34f, -0.357f, 0.38f, 0.02f, 0.004f);
 }
 
-// Mesa + tudo que esta' em cima/atras dela, encostada na parede esquerda.
-// (x, z) e' o ponto do chao sob o centro da mesa.
-static void drawDeskSet(float x, float z, float time) {
-    glPushMatrix();
-    glTranslatef(x, 0.0f, z);
-    glRotatef(90.0f, 0.0f, 1.0f, 0.0f); // gira o sistema local: a "frente" da mesa (+Z local) passa a apontar pro centro da sala (+X)
-
+// Mesa generica na origem do sistema local: tampo (topo em y = 0.75),
+// 4 pes e paineis de tras e de frente. w = largura (X), d = fundo (Z).
+static void drawDesk(float w, float d) {
     setPaint(0.30f, 0.20f, 0.12f);                       // madeira escura
-    box(0.0f, 0.725f, 0.0f, 1.5f, 0.05f, 0.7f);          // tampo (topo em y=0.75)
+    box(0.0f, 0.725f, 0.0f, w, 0.05f, d);                // tampo
     for (int i = -1; i <= 1; i += 2) {                   // 4 pes, um em cada canto
         for (int j = -1; j <= 1; j += 2) {
-            box(0.70f * i, 0.35f, 0.30f * j, 0.06f, 0.70f, 0.06f);
+            box((w * 0.5f - 0.05f) * i, 0.35f, (d * 0.5f - 0.05f) * j, 0.06f, 0.70f, 0.06f);
         }
     }
     setPaint(0.22f, 0.15f, 0.09f);
-    box(0.0f, 0.45f, -0.32f, 1.4f, 0.50f, 0.02f);        // painel de tras
+    box(0.0f, 0.45f, -d * 0.5f + 0.03f, w - 0.10f, 0.50f, 0.02f);   // painel de tras
+    box(0.0f, 0.45f,  d * 0.5f - 0.03f, w - 0.10f, 0.50f, 0.02f);   // painel da frente
+}
 
-    drawComputer(time);
-    drawFan(time);
+// A MESA NA FRENTE DO JOGADOR. A camera (olhos) fica a ~0.85 m da borda
+// e 45 cm acima do tampo, o que da' a sensacao de estar sentado atras
+// dela. O centro da mesa fica livre pra enxergar o corredor: o monitor
+// fica a' esquerda (virado um pouco pro jogador) e o ventilador a' direita.
+static void drawFrontDesk(float zc, float time) {
+    float w = fminf(2.2f, 2.0f * ROOM_HALF_WIDTH - 0.8f);
+
+    glPushMatrix();
+    glTranslatef(0.0f, 0.0f, zc);
+
+    drawDesk(w, 0.7f);
+
+    glPushMatrix();                                  // computador (filho da mesa)
+        glTranslatef(-0.65f, 0.0f, -0.05f);
+        glRotatef(14.0f, 0.0f, 1.0f, 0.0f);          // gira a tela na direcao do jogador
+        drawComputer(time);
+    glPopMatrix();
+
+    glPushMatrix();                                  // ventilador (filho da mesa)
+        glTranslatef(0.85f, 0.0f, -0.12f);
+        glRotatef(-20.0f, 0.0f, 1.0f, 0.0f);
+        drawFan(time);
+    glPopMatrix();
+
+    drawMug();
+    drawPapers();
+    drawPhone(time);
+
+    glPopMatrix();
+}
+
+// Mesa lateral, encostada na parede esquerda, com radio, caixas e o poster.
+// (x, z) e' o ponto do chao sob o centro da mesa.
+static void drawSideDesk(float x, float z) {
+    glPushMatrix();
+    glTranslatef(x, 0.0f, z);
+    glRotatef(90.0f, 0.0f, 1.0f, 0.0f); // a "frente" da mesa (+Z local) passa a apontar pro centro da sala (+X)
+
+    drawDesk(1.5f, 0.7f);
+    drawRadio();
+    drawCardboardBoxes();
     drawPoster();
 
     glPopMatrix();
@@ -491,9 +809,8 @@ static void drawDoorFrame() {
     box(0.0f, DOORWAY_HEIGHT + t * 0.5f, z, DOORWAY_HALF_W * 2.0f + 2.0f * t, t, 0.05f);
 }
 
-// Tapete vermelho escuro no chao, na frente de onde o vigia senta. Um
-// quad um milimetro acima do chao (senao brigaria com ele por
-// profundidade).
+// Tapete vermelho escuro no chao, embaixo da mesa e do jogador. Um quad
+// 6 mm acima do chao (senao brigaria com ele por profundidade).
 static void drawRug() {
     const float hx = ROOM_HALF_WIDTH * 0.45f;
     const float hz = 0.8f;
@@ -508,25 +825,222 @@ static void drawRug() {
     glEnd();
 }
 
-// Ponto de entrada: mobilia a sala. Todas as posicoes sao calculadas a
-// partir das constantes da sala (ROOM_*), entao os moveis acompanham se
-// as dimensoes mudarem.
+// Rodape e friso (divisa entre o azulejo e a tinta) nas paredes da sala.
+static void drawTrim() {
+    const float depth = ROOM_BACK_Z - ROOM_FRONT_Z;
+    const float zMid  = (ROOM_FRONT_Z + ROOM_BACK_Z) * 0.5f;
+    const float hw    = ROOM_HALF_WIDTH;
+    const float ys[2] = { 0.04f, WAINSCOT_H };
+    const float hs[2] = { 0.08f, 0.05f };
+    for (int k = 0; k < 2; ++k) {
+        if (k == 0) setPaint(0.06f, 0.06f, 0.06f); else setPaint(0.10f, 0.12f, 0.11f);
+        box(-hw + 0.015f, ys[k], zMid, 0.03f, hs[k], depth);                       // esquerda
+        box( hw - 0.015f, ys[k], zMid, 0.03f, hs[k], depth);                       // direita
+        box(0.0f, ys[k], ROOM_BACK_Z - 0.015f, 2.0f * hw, hs[k], 0.03f);           // fundo
+    }
+}
+
+// ---------------------------------------------------------------
+// CORREDOR: lampadas piscando, canos, fios, avisos, sangue, porta do fundo
+// ---------------------------------------------------------------
+
+// Intensidade (0 a 1) de uma lampada de fluorescente quase morrendo, num
+// ciclo de 7.3 s: aceso fraco e estavel, depois pisca rapido, depois
+// apagao total. "phase" defasa as lampadas pra nao piscarem juntas.
+static float lampLevel(float t, float phase) {
+    float c = fmodf(t + phase, 7.3f);
+    if (c > 6.4f) return 0.0f;                                      // apagao
+    if (c > 5.6f) return (fmodf(t * 17.0f, 1.0f) < 0.45f) ? 1.0f : 0.1f; // pisca rapido
+    return 0.30f + 0.05f * sinf(t * 2.0f);                          // fraco e estavel
+}
+
+// Liga uma luz pontual esverdeada no teto do corredor, com a forca
+// vinda do nivel da lampada. Atenuacao suave: alcanca uns 6 a 8 metros.
+static void setupCorridorLight(GLenum light, float x, float y, float z, float level) {
+    float k = CORRIDOR_LIGHT_LEVEL * level;
+    const GLfloat pos[]     = { x, y, z, 1.0f };
+    const GLfloat diffuse[] = { 0.55f * k, 0.70f * k, 0.55f * k, 1.0f };
+    const GLfloat none[]    = { 0.0f, 0.0f, 0.0f, 1.0f };
+    glLightfv(light, GL_POSITION, pos);
+    glLightfv(light, GL_DIFFUSE,  diffuse);
+    glLightfv(light, GL_AMBIENT,  none);
+    glLightfv(light, GL_SPECULAR, none);
+    glLightf(light, GL_CONSTANT_ATTENUATION,  1.0f);
+    glLightf(light, GL_LINEAR_ATTENUATION,    0.2f);
+    glLightf(light, GL_QUADRATIC_ATTENUATION, 0.15f);
+    glEnable(light);
+}
+
+// Posicoes das duas lampadas ao longo do corredor (fracao do comprimento).
+static float lampZ(int which) {
+    float L = ROOM_FRONT_Z - CORRIDOR_FAR_Z;
+    return ROOM_FRONT_Z - L * (which == 0 ? 0.33f : 0.70f);
+}
+
+// Suporte de lampada fluorescente: carcaca escura + tubo emissivo cuja
+// luz acompanha o nivel de piscada.
+static void drawLampFixture(float z, float level) {
+    float y = CORRIDOR_HEIGHT - 0.04f;
+    setPaint(0.10f, 0.10f, 0.10f);
+    box(0.0f, y, z, 0.22f, 0.05f, 1.0f);
+    setPaint(0.5f, 0.5f, 0.5f);
+    glowOn(0.8f * level, 1.0f * level, 0.8f * level);
+    box(0.0f, y - 0.035f, z, 0.12f, 0.02f, 0.85f);
+    glowOff();
+}
+
+// Fio solto pendurado do teto, balancando de leve. Pivota no topo.
+static void drawDangle(float x, float y, float z, float len, float time, float phase) {
+    glPushMatrix();
+        glTranslatef(x, y, z);
+        glRotatef(8.0f * sinf(time * 1.1f + phase), 0.0f, 0.0f, 1.0f);
+        setPaint(0.04f, 0.04f, 0.04f);
+        box(0.0f, -len * 0.5f, 0.0f, 0.015f, len, 0.015f);
+    glPopMatrix();
+}
+
+// Gota caindo de um cano ate' o chao, em loop (queda acelerada: frac^2).
+static void drawDrip(float x, float yTop, float z, float phase, float time) {
+    float frac = fmodf(time * 0.7f + phase, 1.0f);
+    float y = yTop - yTop * frac * frac;
+    setPaint(0.60f, 0.65f, 0.70f);
+    glPushMatrix();
+        glTranslatef(x, y, z);
+        glutSolidSphere(0.012, 6, 5);
+    glPopMatrix();
+}
+
+// Aviso colado na parede esquerda do corredor, com rabisco vermelho.
+static void drawNotice(float y, float z) {
+    setPaint(0.80f, 0.78f, 0.65f);
+    box(-CORRIDOR_HALF_W + 0.006f, y, z, 0.004f, 0.40f, 0.30f);
+    setPaint(0.45f, 0.03f, 0.03f);
+    box(-CORRIDOR_HALF_W + 0.009f, y + 0.05f, z, 0.002f, 0.03f, 0.22f);
+    box(-CORRIDOR_HALF_W + 0.009f, y - 0.05f, z, 0.002f, 0.03f, 0.16f);
+}
+
+static void drawCorridorProps(float time) {
+    const float L  = ROOM_FRONT_Z - CORRIDOR_FAR_Z;
+    const float CW = CORRIDOR_HALF_W;
+    const float CH = CORRIDOR_HEIGHT;
+
+    // --- lampadas piscando (luz + suporte) ---
+    float levelA = lampLevel(time, 0.0f);
+    float levelB = lampLevel(time, 3.1f);
+    setupCorridorLight(CORRIDOR_LIGHT_A, 0.0f, CH - 0.2f, lampZ(0), levelA);
+    setupCorridorLight(CORRIDOR_LIGHT_B, 0.0f, CH - 0.2f, lampZ(1), levelB);
+    drawLampFixture(lampZ(0), levelA);
+    drawLampFixture(lampZ(1), levelB);
+
+    // --- canos ao longo das paredes e do teto ---
+    setPaint(0.28f, 0.16f, 0.10f);                      // cano grosso enferrujado
+    cylinderZ(-CW + 0.18f, CH - 0.35f, ROOM_FRONT_Z, L, 0.09f);
+    setPaint(0.25f, 0.27f, 0.28f);                      // cano fino cinza
+    shiny(0.4f, 20.0f);
+    cylinderZ(-CW + 0.12f, CH - 0.70f, ROOM_FRONT_Z, L, 0.05f);
+    shiny(0.0f, 0.0f);
+    setPaint(0.30f, 0.30f, 0.28f);                      // duto grande no teto
+    cylinderZ(CW - 0.35f, CH - 0.12f, ROOM_FRONT_Z, L, 0.12f);
+    setPaint(0.22f, 0.20f, 0.18f);                      // cano baixo na parede direita
+    cylinderZ(CW - 0.10f, 0.25f, ROOM_FRONT_Z, L, 0.05f);
+
+    // flanges (aneis de emenda) a cada 3 m nos canos grossos
+    setPaint(0.18f, 0.12f, 0.08f);
+    for (float d = 1.5f; d < L; d += 3.0f) {
+        float z = ROOM_FRONT_Z - d;
+        cylinderZ(-CW + 0.18f, CH - 0.35f, z + 0.04f, 0.08f, 0.12f);
+        cylinderZ( CW - 0.35f, CH - 0.12f, z + 0.04f, 0.08f, 0.15f);
+    }
+
+    // valvulas vermelhas penduradas no cano grosso (haste + roda)
+    for (int k = 0; k < 2; ++k) {
+        float z = ROOM_FRONT_Z - L * (0.25f + 0.35f * (float)k);
+        glPushMatrix();
+            glTranslatef(-CW + 0.18f, CH - 0.35f - 0.09f, z);
+            setPaint(0.25f, 0.25f, 0.26f);
+            glPushMatrix(); glRotatef(180.0f, 1.0f, 0.0f, 0.0f); cylinderY(0.015f, 0.18f, 8); glPopMatrix();
+            glTranslatef(0.0f, -0.18f, 0.0f);
+            glRotatef(90.0f, 1.0f, 0.0f, 0.0f);          // roda horizontal
+            setPaint(0.55f, 0.05f, 0.05f);
+            glutSolidTorus(0.012, 0.09, 6, 16);
+        glPopMatrix();
+    }
+
+    // gotas caindo dos canos e fios soltos
+    drawDrip(-CW + 0.12f, CH - 0.72f, ROOM_FRONT_Z - L * 0.18f, 0.0f, time);
+    drawDrip(-CW + 0.18f, CH - 0.40f, ROOM_FRONT_Z - L * 0.52f, 0.5f, time);
+    drawDangle( 0.30f, CH - 0.05f, ROOM_FRONT_Z - L * 0.20f, 0.55f, time, 0.0f);
+    drawDangle(-0.25f, CH - 0.05f, ROOM_FRONT_Z - L * 0.45f, 0.80f, time, 2.0f);
+    drawDangle( 0.20f, CH - 0.05f, ROOM_FRONT_Z - L * 0.80f, 0.65f, time, 4.0f);
+
+    // avisos rabiscados na parede
+    drawNotice(1.55f, ROOM_FRONT_Z - L * 0.15f);
+    drawNotice(1.50f, ROOM_FRONT_Z - L * 0.42f);
+    drawNotice(1.60f, ROOM_FRONT_Z - L * 0.68f);
+
+    // rastro de sangue arrastado pelo piso, levando ate' a sala
+    setPaint(0.28f, 0.00f, 0.01f);
+    glBegin(GL_QUADS);
+    for (int k = 0; k < 14; ++k) {
+        float z = ROOM_FRONT_Z - 1.0f - 1.15f * (float)k;
+        if (z < CORRIDOR_FAR_Z + 0.6f) break;
+        float x = 0.45f * sinf(0.9f * (float)k);
+        float w = 0.12f + 0.06f * (float)(k % 3);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glVertex3f(x - w,        0.004f, z + 0.5f);
+        glVertex3f(x + w,        0.004f, z + 0.5f);
+        glVertex3f(x + w * 0.7f, 0.004f, z - 0.5f);
+        glVertex3f(x - w * 0.7f, 0.004f, z - 0.5f);
+    }
+    glEnd();
+
+    // porta dupla no fundo do corredor, de onde o monstro sai
+    float dy = fminf(CH - 0.2f, 2.3f) * 0.5f;
+    float dh = dy * 2.0f;
+    setPaint(0.20f, 0.20f, 0.22f);
+    box(0.0f, dy, CORRIDOR_FAR_Z + 0.03f, 1.4f, dh, 0.05f);
+    setPaint(0.04f, 0.04f, 0.05f);
+    box(0.0f, dy, CORRIDOR_FAR_Z + 0.058f, 0.012f, dh, 0.004f);          // juncao das folhas
+    setPaint(0.55f, 0.56f, 0.58f);
+    box(-0.07f, dy, CORRIDOR_FAR_Z + 0.065f, 0.025f, 0.45f, 0.02f);      // barras de empurrar
+    box( 0.07f, dy, CORRIDOR_FAR_Z + 0.065f, 0.025f, 0.45f, 0.02f);
+    setPaint(0.5f, 0.05f, 0.05f);                                        // lampadinha vermelha de saida
+    glowOn(0.9f * (0.4f + 0.6f * levelB), 0.05f, 0.05f);
+    glPushMatrix();
+        glTranslatef(0.0f, dh + 0.12f, CORRIDOR_FAR_Z + 0.06f);
+        glutSolidSphere(0.05, 10, 8);
+    glPopMatrix();
+    glowOff();
+}
+
+// ===============================================================
+// PONTO DE ENTRADA DOS MOVEIS E DAS LUZES
+// ===============================================================
+// Mobilia a sala e o corredor e configura as luzes extras (monitor e
+// lampadas do corredor). E' chamada ANTES das paredes no display, porque
+// as luzes precisam estar ligadas quando as paredes forem desenhadas.
+// Todas as posicoes saem das constantes da sala (ROOM_*), entao os
+// moveis acompanham se as dimensoes mudarem.
 void drawRoomProps(float time) {
     // O GL_NORMALIZE faz o OpenGL refazer o comprimento das normais
     // depois de glScalef nao uniformes (as caixas esticadas); sem ele a
     // iluminacao dessas faces sairia errada.
     glEnable(GL_NORMALIZE);
 
-    const float zMid  = (ROOM_FRONT_Z + ROOM_BACK_Z) * 0.5f;
-    const float deskX = -ROOM_HALF_WIDTH + 0.38f; // mesa quase encostada na parede esquerda
+    const float zMid       = (ROOM_FRONT_Z + ROOM_BACK_Z) * 0.5f;
+    const float sideDeskX  = -ROOM_HALF_WIDTH + 0.38f;  // mesa lateral quase encostada na parede
+    const float frontDeskZ = PLAYER_EYE_Z - 1.2f;       // borda da mesa a ~0.85 m dos olhos
 
-    // brilho do monitor: um pouco a' frente da tela (a tela fica em zMid + 0.15)
-    setupMonitorLight(deskX + 0.30f, 1.05f, zMid + 0.15f, time);
+    // brilho do monitor: um pouco a' frente da tela, do lado do jogador
+    setupMonitorLight(-0.50f, 1.05f, frontDeskZ + 0.35f, time);
 
     drawRug();
+    drawTrim();
     drawDoorFrame();
-    drawDeskSet(deskX, zMid, time);
+    drawFrontDesk(frontDeskZ, time);
+    drawSideDesk(sideDeskX, zMid);
     drawCabinet(ROOM_HALF_WIDTH - 0.32f, ROOM_FRONT_Z + 1.5f);
+    drawCorridorProps(time);
 
     glDisable(GL_NORMALIZE);
 }
