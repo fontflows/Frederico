@@ -6,9 +6,9 @@
 //   A - Modelagem de objetos 3D com primitivas       -> scene_builder.*, enemy.*
 //   B - Transformacoes geometricas (hierarquia)      -> enemy.cpp, scene_builder.cpp (ventilador)
 //   C - Animacoes (controle de tempo)                -> timerFunc() abaixo
-//   D - Controle de mouse e teclado                  -> passiveMotion(), keyboard()
+//   D - Controle de mouse e teclado                  -> passiveMotion(), keyboard(), mouse()
 //   E - Camera e perspectiva                         -> display() (gluPerspective/gluLookAt)
-//   F - Iluminacao                                   -> lighting.*, luz do monitor em scene_builder.cpp
+//   F - Iluminacao                                   -> lighting.*, feixe da lanterna (spot) aqui
 //   G - Curvas parametricas (Bezier)                 -> bezier.*, usado em currentMonsterPosition()
 //
 // ------------------------------------------------------------
@@ -17,11 +17,13 @@
 // O GLUT roda um laco de eventos (glutMainLoop). Nos registramos
 // "callbacks", funcoes que o GLUT chama quando algo acontece:
 //
-//   glutTimerFunc(16ms) -> timerFunc()  : ATUALIZA o jogo (logica, sem desenhar)
-//   glutDisplayFunc     -> display()    : DESENHA o estado atual na tela
-//   glutKeyboardFunc    -> keyboard()   : tecla apertada
-//   glutPassiveMotionFunc -> passiveMotion() : mouse se mexeu
-//   glutReshapeFunc     -> reshape()    : janela mudou de tamanho
+//   glutTimerFunc(16ms)   -> timerFunc()    : ATUALIZA o jogo (logica, sem desenhar)
+//   glutDisplayFunc       -> display()      : DESENHA o estado atual na tela
+//   glutKeyboardFunc      -> keyboard()     : tecla comum apertada
+//   glutSpecialFunc       -> special()      : setas e teclas F1..F12
+//   glutMouseFunc         -> mouse()        : clique do mouse (menus)
+//   glutPassiveMotionFunc -> passiveMotion(): mouse se mexeu
+//   glutReshapeFunc       -> reshape()      : janela mudou de tamanho
 //
 // A cada ~16 ms o timerFunc() calcula quanto tempo passou (dt), move
 // o monstro, gasta a bateria etc., e chama glutPostRedisplay() pedindo
@@ -32,6 +34,7 @@
 //
 // O jogo e' uma MAQUINA DE ESTADOS (enum GameState):
 //
+//   MENU --(Jogar)--> PLAYING <--(P / Esc)--> PAUSED
 //   PLAYING --(monstro chegou)---> JUMPSCARE --(susto acabou)--> GAME_OVER --(R)--> PLAYING
 //   PLAYING --(cronometro zerou)-> WON ------------------------------------(R)--> PLAYING
 //
@@ -44,12 +47,13 @@
 //   1. Constantes de ajuste (balanceamento do jogo)
 //   2. Estado global
 //   3. Utilitarios e regras de dificuldade (sprint, reset)
-//   4. Camera e posicao do monstro
-//   5. HUD 2D (barra de energia, cronometro, telas de fim)
-//   6. display()  - desenho da cena 3D + HUD
-//   7. Entrada    - teclado e mouse
-//   8. timerFunc()- logica do jogo a cada frame
-//   9. main()     - inicializacao
+//   4. Camera, lanterna (feixe e mira) e posicao do monstro
+//   5. Captura de tela (gravador de PNG) e modo foto
+//   6. HUD 2D (barra, cronometro, menus, telas de fim)
+//   7. display()  - desenho da cena 3D + HUD
+//   8. Entrada    - teclado, setas, mouse
+//   9. timerFunc()- logica do jogo a cada frame
+//  10. main()     - inicializacao
 // ============================================================
 
 #ifdef __APPLE__
@@ -61,7 +65,18 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <vector>
+
+#ifdef _WIN32
+    #include <direct.h>
+    #define MAKE_DIR(p) _mkdir(p)
+#else
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #define MAKE_DIR(p) mkdir(p, 0755)
+#endif
 
 #include "bezier.h"
 #include "lighting.h"
@@ -93,14 +108,24 @@ const float NIGHT_DURATION = 300.0f; // 5 minutos
 // 0 a 1. Ex: 0.07 significa que ele leva 1/0.07 = ~14 s pra atravessar
 // tudo caminhando no escuro.
 const float ADVANCE_RATE_BASE = 0.07f;  // caminhada normal no escuro
-const float RETREAT_RATE      = 0.11f;  // recuo quando a lanterna esta' acesa
+const float RETREAT_RATE      = 0.11f;  // recuo quando a lanterna esta' acesa E apontada pra ele
 
-// Bateria compartilhada entre lanterna e porta. Quando acaba, as duas
-// param de funcionar e nao voltam mais. Os "drains" sao dados como
+// Bateria compartilhada entre lanterna, porta e monitor. Quando acaba,
+// tudo para de funcionar e nao volta mais. Os "drains" sao dados como
 // MAX/segundos, pra ficar facil ler: lanterna sozinha dura 250 s.
-const float POWER_MAX         = 100.0f;
-const float POWER_DRAIN_LIGHT = POWER_MAX / 250.0f; // energia por segundo com lanterna ligada
-const float POWER_DRAIN_DOOR  = POWER_MAX / 40.0f;  // energia por segundo com porta fechada
+const float POWER_MAX           = 100.0f;
+const float POWER_DRAIN_LIGHT   = POWER_MAX / 250.0f; // energia por segundo com lanterna ligada
+const float POWER_DRAIN_DOOR    = POWER_MAX / 40.0f;  // com a porta fechada
+const float POWER_DRAIN_MONITOR = POWER_MAX / 200.0f; // com o monitor ligado
+
+// Feixe da lanterna. A lanterna e' um cone: so' afasta o monstro se o
+// corpo dele estiver DENTRO do cone. BEAM_HALF_ANGLE_DEG e' a meia
+// abertura (graus); o tamanho do corpo do monstro conta como folga.
+// Aumente pra deixar o jogo mais facil, diminua pra exigir mira.
+const float BEAM_HALF_ANGLE_DEG = 13.0f;
+const float BEAM_RANGE          = 26.0f;  // alcance maximo (m)
+const float MONSTER_HIT_RADIUS  = 0.9f;   // raio aproximado do corpo do monstro (m)
+const float MONSTER_CENTER_Y    = 1.5f;   // altura do centro do corpo do monstro (m)
 
 // Dificuldade progressiva: o monstro fica mais rapido conforme a noite
 // avanca (de 1.0x ate' SPEED_RAMP_END) e a velocidade oscila entre
@@ -130,7 +155,8 @@ const float STROKE_FONT_H = 119.05f;
 // ===============================================================
 // 2. ESTADO GLOBAL
 // ===============================================================
-enum GameState { STATE_PLAYING, STATE_JUMPSCARE, STATE_GAME_OVER, STATE_WON };
+enum GameState { STATE_MENU, STATE_PLAYING, STATE_PAUSED,
+                 STATE_JUMPSCARE, STATE_GAME_OVER, STATE_WON };
 
 int g_windowW = 1024;
 int g_windowH = 768;
@@ -144,10 +170,14 @@ Vector3 g_eye(0.0f, 1.2f, Scene::ROOM_BACK_Z - 1.0f);
 float g_yawDeg   = 0.0f;
 float g_pitchDeg = 0.0f;
 bool  g_warping  = false; // evita que o glutWarpPointer gere um evento fantasma de movimento
+bool  g_cursorShown = false; // o cursor so' aparece nos menus
 
 // Recursos do jogador
 bool  g_flashlightOn = false; // comeca desligada: economiza bateria e deixa o corredor escuro
+bool  g_monitorOn    = false; // monitor da mesa (mostra onde o monstro esta')
 float g_power        = POWER_MAX;
+bool  g_beamHit      = false; // o feixe da lanterna esta' acertando o monstro agora?
+bool  g_debug        = false; // painel de depuracao (F3)
 
 // Porta: g_doorClosing e' o que o jogador PEDIU; g_doorOffsetY e' onde a
 // porta REALMENTE esta' (ela anima suavemente ate' o alvo).
@@ -159,11 +189,12 @@ float g_monsterT = 0.0f; // parametro t da curva de Bezier, [0,1] (0 = fundo, 1 
 float g_walkTime = 0.0f; // tempo acumulado que alimenta a animacao de caminhada
 
 // Fluxo do jogo
-GameState g_state       = STATE_PLAYING;
-float     g_stateTimer  = 0.0f; // segundos desde que entrou em GAME_OVER / WON (anima as telas)
+GameState g_state       = STATE_MENU;
+float     g_stateTimer  = 0.0f; // segundos desde que entrou no estado (anima menus e telas de fim)
 float     g_nightTime   = 0.0f; // segundos de noite sobrevividos (alimenta o cronometro)
 float     g_uiTime      = 0.0f; // relogio que nunca para: usado em efeitos visuais (piscar, ventilador)
 float     g_jumpscareProgress = 0.0f; // 0..1 durante o salto do monstro
+int       g_menuSel     = 0;    // item selecionado no menu
 
 // Humor / sprint do monstro
 float g_speedJitter   = 1.0f;  // multiplicador sorteado (ver SPEED_JITTER_*)
@@ -174,12 +205,27 @@ float g_nextSprintIn   = 10.0f; // quanto falta pro proximo sprint comecar
 
 int g_lastTimeMs = 0; // instante do frame anterior, pra calcular o dt
 
+// Captura de tela e modo foto (secao 5)
+bool  g_screenshotRequested = false;
+int   g_screenshotCount     = 0;
+bool  g_photoActive   = false;   // rodando a sequencia automatica de fotos?
+bool  g_photoExitAtEnd = false;
+int   g_photoIndex    = 0;
+int   g_photoFrames   = 0;
+bool  g_camOverride   = false;   // camera livre (usada so' nas fotos)
+Vector3 g_ovEye, g_ovCenter;
+float g_photoAmbient  = -1.0f;   // luz ambiente extra na foto (<0 = nao mexe)
+float g_photoMouth    = -1.0f;   // boca do monstro forcada (<0 = normal)
+bool  g_photoHud      = false;
+float g_photoTime     = 2.0f;    // "relogio" fixo da foto (controla piscadas e ventilador)
+
 // ===============================================================
 // 3. UTILITARIOS E REGRAS DE DIFICULDADE
 // ===============================================================
 
 // Limita x ao intervalo [0,1].
 float clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 // Interpolacao linear: t=0 devolve a, t=1 devolve b, valores no meio
 // misturam proporcionalmente. Usada nas cores e nas rampas.
@@ -188,6 +234,16 @@ float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 // Numero aleatorio uniforme em [lo, hi].
 float randRange(float lo, float hi) {
     return lo + (float)rand() / (float)RAND_MAX * (hi - lo);
+}
+
+// "Hash": numero fixo em [0,1] a partir de dois inteiros. Sempre da' o
+// mesmo valor pra mesma entrada, entao serve de "aleatorio estavel"
+// (as particulas de poeira nao ficam trocando de lugar a cada frame).
+float hash01(int a, int b) {
+    unsigned int n = (unsigned int)a * 73856093u ^ (unsigned int)b * 19349663u;
+    n = (n << 13) ^ n;
+    n = n * (n * n * 15731u + 789221u) + 1376312589u;
+    return (float)(n & 0x7fffffffu) / 2147483647.0f;
 }
 
 // Quanto da noite ja' passou, de 0 (inicio) a 1 (amanheceu).
@@ -206,8 +262,8 @@ void scheduleNextSprint() {
     g_nextSprintIn = randRange(SPRINT_GAP_MIN, SPRINT_GAP_MAX) * shrink;
 }
 
-// Comeca uma noite nova do zero. E' chamada uma vez no inicio do
-// programa e toda vez que o jogador aperta R depois de perder/ganhar.
+// Comeca uma noite nova do zero (estado PLAYING). E' chamada pelo menu
+// ("Jogar"/"Reiniciar") e quando o jogador aperta R depois de perder/ganhar.
 // Restaura TUDO (bateria, porta, monstro, cronometro).
 void resetGame() {
     g_state             = STATE_PLAYING;
@@ -216,6 +272,8 @@ void resetGame() {
 
     g_power             = POWER_MAX;
     g_flashlightOn      = false;
+    g_monitorOn         = false;
+    g_beamHit           = false;
     g_doorClosing       = false;
     g_doorOffsetY       = 0.0f;
 
@@ -231,7 +289,7 @@ void resetGame() {
 }
 
 // ===============================================================
-// 4. CAMERA E POSICAO DO MONSTRO
+// 4. CAMERA, LANTERNA E POSICAO DO MONSTRO
 // ===============================================================
 
 // [Requisito E] Direcao "para frente" da camera a partir de yaw/pitch
@@ -266,12 +324,464 @@ Vector3 currentMonsterPosition() {
     return doorwayPos + (lungeTarget - doorwayPos) * g_jumpscareProgress;
 }
 
-// ===============================================================
-// 5. HUD 2D
+// A MIRA DA LANTERNA. O feixe e' um cone com vertice no olho do
+// jogador, eixo na direcao "dir" (vetor unitario) e meia abertura
+// BEAM_HALF_ANGLE_DEG. Um alvo (centro + raio) esta' iluminado se o
+// angulo entre "dir" e a direcao ate' o centro dele for menor que a
+// meia abertura MAIS o angulo que o proprio raio ocupa a essa distancia
+// (um alvo grande conta mesmo que so' a ponta dele entre no cone).
+// Funcao generica: serve pro monstro de hoje e pros de amanha.
 //
-// O HUD (barra de energia, cronometro, telas de fim) e' desenhado DEPOIS
-// da cena 3D, por cima. Como o OpenGL classico so' sabe desenhar com
-// uma projecao por vez, usamos a tecnica padrao:
+// Matematica: cos(angulo) = (v . dir) / |v|, onde v = alvo - olho.
+bool flashlightHits(const Vector3& eye, const Vector3& dir,
+                    const Vector3& target, float radius) {
+    Vector3 v = target - eye;
+    float dist = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (dist > BEAM_RANGE) return false;
+    if (dist < 0.001f) return true;
+    float cosA  = clampf((v.x * dir.x + v.y * dir.y + v.z * dir.z) / dist, -1.0f, 1.0f);
+    float angle = acosf(cosA) / DEG2RAD;                       // angulo ate' o centro do alvo
+    float slack = asinf(clampf(radius / dist, 0.0f, 1.0f)) / DEG2RAD; // angulo do raio do alvo
+    return angle <= BEAM_HALF_ANGLE_DEG + slack;
+}
+
+// Transforma a luz da lanterna (GL_LIGHT0) num SPOT: um cone de luz
+// apontado pra "dir", com a mesma abertura do feixe, em vez de uma luz
+// que brilha igual pra todos os lados. GL_SPOT_EXPONENT concentra a
+// intensidade no centro do cone. Chamar depois do updateFlashlight e do
+// gluLookAt: o OpenGL transforma a direcao pela matriz atual.
+void setupFlashlightSpot(const Vector3& dir) {
+    const GLfloat d[3] = { dir.x, dir.y, dir.z };
+    glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, d);
+    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, BEAM_HALF_ANGLE_DEG + 3.0f);
+    glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 12.0f);
+}
+
+// Desenha o FEIXE VISIVEL da lanterna: luz volumetrica saindo da "mao"
+// do jogador, com poeira flutuando dentro. Tecnicas:
+//  - FATIAS: em vez de uma casca de cone (que teria uma borda dura), o
+//    feixe e' uma pilha de 64 discos perpendiculares ao eixo, cada um com
+//    um gradiente radial (opaco no centro, transparente na borda). A
+//    soma deles da' um brilho suave, mais forte no eixo, que some nas
+//    bordas e com a distancia (o alpha de cada fatia cai com a distancia).
+//  - Transparencia ADITIVA (GL_SRC_ALPHA, GL_ONE): a cor do feixe e'
+//    SOMADA ao que ja' esta' na tela, entao ele so' clareia, como luz.
+//  - Escrita de profundidade desligada: o feixe nao esconde nada, mas
+//    paredes e o monstro que estao na frente dele ainda o escondem (o
+//    teste de profundidade continua ligado).
+// O desenho acontece num referencial girado pra que -Z local aponte pra
+// onde a camera olha (Ry(-yaw) * Rx(pitch)).
+void drawFlashlightBeam(const Vector3& eye, const Vector3& dir, bool hit) {
+    float yaw   = atan2f(dir.x, -dir.z) / DEG2RAD;
+    float pitch = asinf(clampf(dir.y, -1.0f, 1.0f)) / DEG2RAD;
+
+    // intensidade: pisca quando a bateria esta' acabando; mais forte
+    // quando acerta o monstro
+    float k = hit ? 1.6f : 1.0f;
+    if (g_state == STATE_PLAYING && g_power < POWER_MAX * 0.2f) {
+        k *= 0.55f + 0.45f * fabsf(sinf(g_uiTime * 23.0f));
+    }
+    // cor: branco quente; branco-azulado quando acerta o monstro
+    float cr = hit ? 0.85f : 1.00f, cg = hit ? 0.92f : 0.95f, cb = hit ? 1.00f : 0.80f;
+
+    const float L = 16.0f;                                    // comprimento do feixe desenhado
+    const float R = L * tanf(BEAM_HALF_ANGLE_DEG * DEG2RAD);  // raio do feixe na ponta
+    const float ox = 0.13f, oy = -0.10f, oz = -0.15f;         // onde a "mao" segura (local)
+
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                 GL_CURRENT_BIT | GL_POINT_BIT);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+
+    glPushMatrix();
+        glTranslatef(eye.x, eye.y, eye.z);
+        glRotatef(-yaw,  0.0f, 1.0f, 0.0f);
+        glRotatef(pitch, 1.0f, 0.0f, 0.0f);
+
+        const int SLICES = 64, SEG = 24;
+        for (int s = 0; s < SLICES; ++s) {
+            // fatias mais densas perto da mao (expoente 1.5): e' ali que o
+            // cone e' estreito e precisa de mais luz pra aparecer
+            float u  = powf((float)(s + 1) / (float)SLICES, 1.5f); // 0 = mao, 1 = ponta do feixe
+            // o eixo vai da mao ate' a linha de visao (0,0,-L), como uma
+            // lanterna segurada apontando pra frente
+            float cx = ox * (1.0f - u), cy = oy * (1.0f - u);
+            float cz = oz + (-L - oz) * u;
+            float rr = R * u;                                    // raio da fatia (cone)
+            // opacidade no centro: cai com a distancia, mas com reforco
+            // perto da mao (a luz e' mais concentrada la')
+            float a  = 0.024f * k * powf(1.0f - u, 1.2f) / (0.35f + 2.0f * u);
+
+            glBegin(GL_TRIANGLE_FAN);                            // miolo do disco
+                glColor4f(cr, cg, cb, a);
+                glVertex3f(cx, cy, cz);
+                glColor4f(cr, cg, cb, a * 0.45f);
+                for (int i = 0; i <= SEG; ++i) {
+                    float t = 6.2831853f * (float)i / (float)SEG;
+                    glVertex3f(cx + 0.5f * rr * cosf(t), cy + 0.5f * rr * sinf(t), cz);
+                }
+            glEnd();
+            glBegin(GL_QUAD_STRIP);                              // borda que some
+                for (int i = 0; i <= SEG; ++i) {
+                    float t = 6.2831853f * (float)i / (float)SEG;
+                    glColor4f(cr, cg, cb, a * 0.45f);
+                    glVertex3f(cx + 0.5f * rr * cosf(t), cy + 0.5f * rr * sinf(t), cz);
+                    glColor4f(cr, cg, cb, 0.0f);
+                    glVertex3f(cx + rr * cosf(t), cy + rr * sinf(t), cz);
+                }
+            glEnd();
+        }
+
+        // poeira: pontos espalhados dentro do cone, flutuando devagar.
+        // A posicao de cada um vem de hash01 (estavel) + um deslocamento
+        // que depende do tempo.
+        glEnable(GL_POINT_SMOOTH);
+        glPointSize(2.0f);
+        glBegin(GL_POINTS);
+            for (int i = 0; i < 70; ++i) {
+                float u   = 0.04f + 0.96f * hash01(i, 1);                // posicao ao longo do feixe
+                float rad = sqrtf(hash01(i, 2)) * R * u * 0.85f;          // raio dentro do cone
+                rad *= 0.75f + 0.25f * sinf(g_uiTime * 0.7f + (float)i);
+                float ang = 6.2831853f * hash01(i, 3) + g_uiTime * 0.12f * (float)((i % 3) - 1);
+                float cx = ox * (1.0f - u), cy = oy * (1.0f - u);
+                float cz = oz + (-L - oz) * u;
+                float a  = (0.25f + 0.55f * hash01(i, 4)) * (1.0f - 0.6f * u) * k;
+                glColor4f(1.0f, 1.0f, 0.9f, a);
+                glVertex3f(cx + rad * cosf(ang), cy + rad * sinf(ang) + 0.04f * sinf(g_uiTime * 0.5f + (float)i), cz);
+            }
+        glEnd();
+    glPopMatrix();
+    glPopAttrib();
+}
+
+// ===============================================================
+// 5. CAPTURA DE TELA (PNG) E MODO FOTO
+//
+// Escrevemos o PNG "na mao", sem biblioteca. Um arquivo PNG e':
+//   assinatura de 8 bytes + chunks (IHDR cabecalho, IDAT dados, IEND fim).
+// Cada chunk = tamanho + tipo + dados + CRC32. Os pixels vao dentro de
+// um fluxo "zlib" (formato deflate). Pra o arquivo nao ficar enorme:
+//   1. filtro "Sub": cada byte vira a diferenca pro pixel da esquerda
+//      (cenas escuras e suaves viram quase so' zeros);
+//   2. compressao LZ77: sequencias repetidas viram "volte N bytes e copie
+//      M" (achadas com uma tabela hash de 3 bytes);
+//   3. codigos de Huffman FIXOS do padrao deflate pra gravar isso em bits.
+// ===============================================================
+
+unsigned int g_crcTable[256];
+bool         g_crcReady = false;
+
+void initCrcTable() {
+    for (unsigned int n = 0; n < 256; ++n) {
+        unsigned int c = n;
+        for (int k = 0; k < 8; ++k) c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        g_crcTable[n] = c;
+    }
+    g_crcReady = true;
+}
+
+unsigned int crcUpdate(unsigned int crc, const unsigned char* d, size_t n) {
+    for (size_t i = 0; i < n; ++i) crc = g_crcTable[(crc ^ d[i]) & 0xFFu] ^ (crc >> 8);
+    return crc;
+}
+
+void putU32(std::vector<unsigned char>& v, unsigned int x) {
+    v.push_back((unsigned char)((x >> 24) & 0xFFu));
+    v.push_back((unsigned char)((x >> 16) & 0xFFu));
+    v.push_back((unsigned char)((x >> 8) & 0xFFu));
+    v.push_back((unsigned char)(x & 0xFFu));
+}
+
+void writeChunk(FILE* f, const char* type, const std::vector<unsigned char>& data) {
+    std::vector<unsigned char> head;
+    putU32(head, (unsigned int)data.size());
+    fwrite(&head[0], 1, 4, f);
+    fwrite(type, 1, 4, f);
+    if (!data.empty()) fwrite(&data[0], 1, data.size(), f);
+    unsigned int crc = crcUpdate(0xFFFFFFFFu, (const unsigned char*)type, 4);
+    if (!data.empty()) crc = crcUpdate(crc, &data[0], data.size());
+    crc ^= 0xFFFFFFFFu;
+    std::vector<unsigned char> tail;
+    putU32(tail, crc);
+    fwrite(&tail[0], 1, 4, f);
+}
+
+// Escritor de bits: o deflate grava os campos "LSB primeiro" (bit menos
+// significativo antes), mas os codigos de Huffman "MSB primeiro".
+struct BitWriter {
+    std::vector<unsigned char>* out;
+    unsigned int acc;
+    int nbits;
+    explicit BitWriter(std::vector<unsigned char>* o) : out(o), acc(0), nbits(0) {}
+    void put(unsigned int value, int count) {            // campo comum (LSB primeiro)
+        acc |= value << nbits;
+        nbits += count;
+        while (nbits >= 8) { out->push_back((unsigned char)(acc & 0xFFu)); acc >>= 8; nbits -= 8; }
+    }
+    void putCode(unsigned int code, int len) {           // codigo de Huffman (MSB primeiro)
+        unsigned int r = 0;
+        for (int i = 0; i < len; ++i) r = (r << 1) | ((code >> i) & 1u);
+        put(r, len);
+    }
+    void flush() { if (nbits > 0) { out->push_back((unsigned char)(acc & 0xFFu)); acc = 0; nbits = 0; } }
+};
+
+// Tabelas do deflate: comprimentos 3..258 e distancias 1..32768 sao
+// divididos em faixas; cada faixa tem um simbolo e alguns bits "extras".
+const int LEN_BASE[29]  = { 3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258 };
+const int LEN_EXTRA[29] = { 0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0 };
+const int DIST_BASE[30] = { 1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577 };
+const int DIST_EXTRA[30]= { 0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
+
+// Simbolo do alfabeto literal/comprimento no codigo de Huffman FIXO:
+//   0-143 -> 8 bits, 144-255 -> 9 bits, 256-279 -> 7 bits, 280-287 -> 8 bits
+void putFixedSymbol(BitWriter& bw, int sym) {
+    if (sym < 144)      bw.putCode(0x30u + (unsigned int)sym, 8);
+    else if (sym < 256) bw.putCode(0x190u + (unsigned int)(sym - 144), 9);
+    else if (sym < 280) bw.putCode((unsigned int)(sym - 256), 7);
+    else                bw.putCode(0xC0u + (unsigned int)(sym - 280), 8);
+}
+
+void putMatch(BitWriter& bw, int len, int dist) {
+    int li = 28;
+    while (LEN_BASE[li] > len) --li;
+    putFixedSymbol(bw, 257 + li);
+    if (LEN_EXTRA[li]) bw.put((unsigned int)(len - LEN_BASE[li]), LEN_EXTRA[li]);
+    int di = 29;
+    while (DIST_BASE[di] > dist) --di;
+    bw.putCode((unsigned int)di, 5);                      // distancias: codigo fixo de 5 bits
+    if (DIST_EXTRA[di]) bw.put((unsigned int)(dist - DIST_BASE[di]), DIST_EXTRA[di]);
+}
+
+// Comprime "d" (n bytes) num unico bloco deflate de Huffman fixo.
+void deflateFixed(const std::vector<unsigned char>& d, std::vector<unsigned char>& out) {
+    BitWriter bw(&out);
+    bw.put(1, 1);   // BFINAL = 1 (ultimo bloco)
+    bw.put(1, 2);   // BTYPE  = 01 (Huffman fixo)
+
+    const size_t n = d.size();
+    const int HASH_SIZE = 1 << 15;
+    std::vector<int> head(HASH_SIZE, -1), prev(n, -1);
+
+    size_t i = 0;
+    while (i < n) {
+        int bestLen = 0, bestDist = 0;
+        if (i + 2 < n) {
+            unsigned int h = (((unsigned int)d[i] << 10) ^ ((unsigned int)d[i + 1] << 5) ^ d[i + 2]) & (HASH_SIZE - 1);
+            int cand = head[h];
+            int depth = 0;
+            size_t maxLen = n - i; if (maxLen > 258) maxLen = 258;
+            while (cand >= 0 && (int)i - cand <= 32768 && depth++ < 24) {
+                size_t l = 0;
+                while (l < maxLen && d[cand + l] == d[i + l]) ++l;
+                if ((int)l > bestLen) {
+                    bestLen = (int)l; bestDist = (int)i - cand;
+                    if (l == maxLen) break;
+                }
+                cand = prev[cand];
+            }
+        }
+        size_t step = 1;
+        if (bestLen >= 3) { putMatch(bw, bestLen, bestDist); step = (size_t)bestLen; }
+        else              { putFixedSymbol(bw, d[i]); }
+        for (size_t k = 0; k < step; ++k) {                 // registra as posicoes cobertas na tabela hash
+            size_t pos = i + k;
+            if (pos + 2 < n) {
+                unsigned int h = (((unsigned int)d[pos] << 10) ^ ((unsigned int)d[pos + 1] << 5) ^ d[pos + 2]) & (HASH_SIZE - 1);
+                prev[pos] = head[h];
+                head[h] = (int)pos;
+            }
+        }
+        i += step;
+    }
+    putFixedSymbol(bw, 256);   // fim de bloco
+    bw.flush();
+}
+
+// Grava um PNG RGB 8 bits. "rgb" vem do glReadPixels (linhas de BAIXO
+// pra CIMA), entao invertemos a ordem das linhas ao montar o arquivo.
+bool savePng(const char* path, int w, int h, const unsigned char* rgb) {
+    if (!g_crcReady) initCrcTable();
+
+    // dados filtrados: cada linha comeca com o byte de filtro 1 ("Sub"),
+    // e cada byte vira (byte - byte do pixel da esquerda)
+    const size_t stride = (size_t)w * 3;
+    std::vector<unsigned char> raw;
+    raw.reserve((size_t)h * (1 + stride));
+    for (int y = h - 1; y >= 0; --y) {
+        const unsigned char* row = rgb + (size_t)y * stride;
+        raw.push_back(1);
+        for (size_t i = 0; i < stride; ++i) {
+            unsigned char left = (i >= 3) ? row[i - 3] : 0;
+            raw.push_back((unsigned char)(row[i] - left));
+        }
+    }
+
+    // fluxo zlib = cabecalho (0x78 0x01) + deflate + checksum Adler-32 dos dados crus
+    std::vector<unsigned char> z;
+    z.push_back(0x78); z.push_back(0x01);
+    deflateFixed(raw, z);
+    unsigned int a = 1, b = 0;
+    for (size_t i = 0; i < raw.size(); ++i) { a = (a + raw[i]) % 65521u; b = (b + a) % 65521u; }
+    putU32(z, (b << 16) | a);
+
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    const unsigned char sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    fwrite(sig, 1, 8, f);
+    std::vector<unsigned char> ihdr;
+    putU32(ihdr, (unsigned int)w);
+    putU32(ihdr, (unsigned int)h);
+    ihdr.push_back(8); ihdr.push_back(2); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+    writeChunk(f, "IHDR", ihdr);
+    writeChunk(f, "IDAT", z);
+    writeChunk(f, "IEND", std::vector<unsigned char>());
+    fclose(f);
+    return true;
+}
+
+// Le o quadro que acabou de ser desenhado (buffer de tras, antes do
+// glutSwapBuffers) e salva em PNG.
+bool captureFrame(const char* path) {
+    std::vector<unsigned char> pix((size_t)g_windowW * g_windowH * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, g_windowW, g_windowH, GL_RGB, GL_UNSIGNED_BYTE, &pix[0]);
+    return savePng(path, g_windowW, g_windowH, &pix[0]);
+}
+
+// --- Modo foto -------------------------------------------------
+// "./frederico --fotos" monta cada cena de uma lista (applyShot), espera
+// alguns quadros estabilizarem, salva o PNG em docs/imagens/ e passa pra
+// proxima. Cada foto usa um "relogio" fixo (g_photoTime) pra que as
+// lampadas e o ventilador saiam sempre na mesma pose, e uma luz ambiente
+// extra opcional pra enxergar o cenario (no jogo normal e' quase breu).
+const int NUM_SHOTS = 12;
+const char* SHOT_NAMES[NUM_SHOTS] = {
+    "01_pov_jogador", "02_corredor", "03_corredor_piscando", "04_monstro_corpo",
+    "05_monstro_rosto", "06_sala_geral", "07_mesa_monitor", "08_porta",
+    "09_susto", "10_game_over", "11_menu", "12_vitoria"
+};
+
+void setCam(const Vector3& e, const Vector3& c) {
+    g_camOverride = true;
+    g_ovEye = e;
+    g_ovCenter = c;
+}
+
+void applyShot(int i) {
+    resetGame();
+    g_camOverride = false;
+    g_photoAmbient = -1.0f;
+    g_photoMouth = -1.0f;
+    g_photoHud = false;
+    g_photoTime = 2.0f;
+    g_walkTime = 1.1f;
+    g_yawDeg = 0.0f;
+    g_pitchDeg = 0.0f;
+
+    BezierPath path = Enemy::getPath();
+    const float F    = Scene::ROOM_FRONT_Z;
+    const float HW   = Scene::ROOM_HALF_WIDTH;
+    const float zMid = (Scene::ROOM_FRONT_Z + Scene::ROOM_BACK_Z) * 0.5f;
+    const float deskZ = g_eye.z - 1.2f;
+
+    switch (i) {
+    case 0: { // visao do jogador, com HUD, lanterna apontada pro monstro
+        g_flashlightOn = true; g_monitorOn = true; g_power = 78.0f; g_nightTime = 95.0f;
+        g_monsterT = 0.55f; g_photoHud = true;
+        break; }
+    case 1: { // corredor visto da porta, lanterna ligada
+        setCam(Vector3(0.0f, 1.5f, F + 0.3f), Vector3(0.0f, 1.4f, Scene::CORRIDOR_FAR_Z));
+        g_flashlightOn = true; g_monsterT = 0.45f; g_photoAmbient = 0.12f;
+        break; }
+    case 2: { // corredor no instante em que a lampada pisca forte
+        setCam(Vector3(0.0f, 1.5f, F + 0.3f), Vector3(0.0f, 1.4f, Scene::CORRIDOR_FAR_Z));
+        g_photoTime = 5.65f; g_monsterT = 0.62f; g_photoAmbient = 0.14f;
+        break; }
+    case 3: { // monstro de corpo inteiro
+        Vector3 mp = evaluateBezier(path, 0.8f);
+        setCam(Vector3(mp.x * 0.5f, 1.7f, F + 0.8f), Vector3(mp.x, 1.5f, mp.z));
+        g_flashlightOn = true; g_monsterT = 0.8f; g_photoAmbient = 0.22f;
+        break; }
+    case 4: { // rosto do monstro, boca aberta
+        Vector3 mp = evaluateBezier(path, 0.97f);
+        setCam(Vector3(mp.x, 2.25f, mp.z + 1.9f), Vector3(mp.x, 2.3f, mp.z + 0.82f));
+        g_flashlightOn = true; g_monsterT = 0.97f; g_photoMouth = 0.55f;
+        g_photoAmbient = 0.25f; g_walkTime = 1.3f;
+        break; }
+    case 5: { // panorama da sala
+        setCam(Vector3(HW - 0.5f, 2.1f, Scene::ROOM_BACK_Z - 0.4f), Vector3(-0.5f, 0.9f, zMid - 0.5f));
+        g_monitorOn = true; g_monsterT = 0.8f; g_photoAmbient = 0.35f;
+        break; }
+    case 6: { // mesa com o monitor ligado
+        setCam(Vector3(0.15f, 1.45f, deskZ + 1.0f), Vector3(-0.6f, 0.95f, deskZ));
+        g_monitorOn = true; g_monsterT = 0.8f; g_photoAmbient = 0.12f;
+        break; }
+    case 7: { // porta de aco fechada
+        g_doorClosing = true; g_doorOffsetY = Scene::DOORWAY_HEIGHT;
+        setCam(Vector3(0.5f, 1.4f, F + 1.5f), Vector3(0.0f, 1.1f, F));
+        g_flashlightOn = true; g_photoAmbient = 0.25f;
+        break; }
+    case 8: { // o susto
+        g_state = STATE_JUMPSCARE; g_jumpscareProgress = 0.92f;
+        g_flashlightOn = true; g_monsterT = 1.0f;
+        break; }
+    case 9: { // game over
+        g_state = STATE_GAME_OVER; g_jumpscareProgress = 1.0f; g_stateTimer = 3.2f;
+        g_nightTime = 187.0f; g_photoHud = true;
+        break; }
+    case 10: { // menu inicial
+        g_state = STATE_MENU; g_stateTimer = 1.0f; g_photoHud = true;
+        break; }
+    default: { // vitoria
+        g_state = STATE_WON; g_stateTimer = 3.0f; g_nightTime = NIGHT_DURATION; g_photoHud = true;
+        break; }
+    }
+}
+
+void startPhotoSession(bool exitAtEnd) {
+    MAKE_DIR("docs");
+    MAKE_DIR("docs/imagens");
+    g_photoActive = true;
+    g_photoExitAtEnd = exitAtEnd;
+    g_photoIndex = 0;
+    g_photoFrames = 0;
+    applyShot(0);
+}
+
+// Chamada no fim do display(), depois de desenhar e antes do swap.
+void photoAfterRender() {
+    if (++g_photoFrames < 4) return;           // deixa a cena estabilizar
+    char path[128];
+    std::snprintf(path, sizeof(path), "docs/imagens/%s.png", SHOT_NAMES[g_photoIndex]);
+    if (captureFrame(path)) std::printf("foto salva: %s\n", path);
+    else                    std::printf("ERRO ao salvar: %s\n", path);
+
+    g_photoFrames = 0;
+    if (++g_photoIndex >= NUM_SHOTS) {
+        g_photoActive = false;
+        g_camOverride = false;
+        g_photoAmbient = -1.0f;
+        g_photoMouth = -1.0f;
+        if (g_photoExitAtEnd) exit(0);
+        resetGame();
+        g_state = STATE_MENU;
+        g_stateTimer = 0.0f;
+    } else {
+        applyShot(g_photoIndex);
+    }
+}
+
+// ===============================================================
+// 6. HUD 2D
+//
+// O HUD (barra de energia, cronometro, menus, telas de fim) e' desenhado
+// DEPOIS da cena 3D, por cima. Como o OpenGL classico so' sabe desenhar
+// com uma projecao por vez, usamos a tecnica padrao:
 //   1. guarda o estado atual (glPushAttrib) e as matrizes (glPushMatrix);
 //   2. troca pra projecao ORTOGRAFICA 2D em pixels (gluOrtho2D), onde
 //      (0,0) e' o canto inferior esquerdo e (largura,altura) o superior
@@ -348,6 +858,30 @@ void drawStrokeCentered(void* font, const char* text, float cx, float cy,
             glutStrokeCharacter(font, *c); // desenha a letra e avanca a posicao
         }
     glPopMatrix();
+}
+
+// Titulo "defeituoso": o efeito de tubo de TV com problema, usado no menu
+// e no game over. Feito com numeros aleatorios: desloca o texto alguns
+// pixels a cada frame; de vez em quando (a cada 1.7 s) faz uma "rajada"
+// de tremor forte com um "fantasma" branco; e as vezes apaga o brilho
+// por um instante. "tt" e' o tempo que alimenta a pulsacao.
+void drawGlitchText(const char* text, float cx, float cy, float h, float tt,
+                    float r, float g, float b) {
+    bool  burst = fmodf(tt, 1.7f) < 0.12f;       // 0.12 s de rajada a cada 1.7 s
+    float shake = burst ? 10.0f : 1.5f;          // amplitude do tremor em pixels
+    float ox = randRange(-shake, shake);
+    float oy = randRange(-shake, shake);
+    float alpha = 0.8f + 0.2f * sinf(tt * 25.0f);
+    if (rand() % 14 == 0) alpha *= 0.15f;        // ~1 frame em 14 quase apaga
+
+    glColor4f(r * 0.65f, g * 0.65f, b * 0.65f, 0.30f * alpha);   // brilho (linha grossa translucida)
+    drawStrokeCentered(GLUT_STROKE_ROMAN, text, cx + ox, cy + oy, h, 9.0f);
+    glColor4f(r, g, b, alpha);                                   // o titulo em si
+    drawStrokeCentered(GLUT_STROKE_ROMAN, text, cx + ox, cy + oy, h, 4.0f);
+    if (burst) {                                                 // "fantasma" branco deslocado
+        glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
+        drawStrokeCentered(GLUT_STROKE_ROMAN, text, cx - ox, cy + oy * 3.0f, h, 2.0f);
+    }
 }
 
 // Gradiente radial usado nas vinhetas: um "leque" de triangulos saindo
@@ -454,6 +988,43 @@ void drawPowerBar() {
     drawBitmapText(GLUT_BITMAP_HELVETICA_18, MARGIN, MARGIN + BAR_H + 8.0f, label);
 }
 
+// Legenda das teclas no rodape, no centro. Cada item acende (dourado)
+// quando o recurso esta' ligado e fica cinza quando desligado.
+void drawControlHints() {
+    struct Hint { const char* text; bool on; };
+    const Hint hints[4] = {
+        { "F LANTERNA", g_flashlightOn },
+        { "D PORTA",    g_doorClosing },
+        { "C MONITOR",  g_monitorOn },
+        { "P PAUSA",    false }
+    };
+    void* font = GLUT_BITMAP_HELVETICA_12;
+    const float GAP = 26.0f;
+    float total = GAP * 3.0f;
+    for (int i = 0; i < 4; ++i) total += (float)glutBitmapLength(font, (const unsigned char*)hints[i].text);
+    float x = g_windowW * 0.5f - total * 0.5f;
+    for (int i = 0; i < 4; ++i) {
+        if (hints[i].on) glColor4f(1.0f, 0.85f, 0.4f, 1.0f);
+        else             glColor4f(0.55f, 0.55f, 0.55f, 0.9f);
+        drawBitmapText(font, x, 16.0f, hints[i].text);
+        x += (float)glutBitmapLength(font, (const unsigned char*)hints[i].text) + GAP;
+    }
+}
+
+// Painel de depuracao (F3): mostra os numeros internos do jogo. Ajuda a
+// balancear (ver a velocidade do monstro, o sprint) e a conferir a mira.
+void drawDebugInfo() {
+    char line[160];
+    std::snprintf(line, sizeof(line),
+                  "t=%.3f  mira=%s  sprint=%s  humor=%.2fx  noite=%.0fs  energia=%.0f%%  yaw=%.0f pitch=%.0f",
+                  g_monsterT, g_beamHit ? "SIM" : "nao", g_sprinting ? "SIM" : "nao",
+                  currentSpeedMultiplier(), g_nightTime, g_power, g_yawDeg, g_pitchDeg);
+    glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
+    fillRect(8.0f, g_windowH - 30.0f, 8.0f + 760.0f, g_windowH - 8.0f);
+    glColor4f(0.5f, 1.0f, 0.6f, 1.0f);
+    drawBitmapText(GLUT_BITMAP_HELVETICA_12, 14.0f, g_windowH - 24.0f, line);
+}
+
 // Cronometro da noite (canto superior direito): contagem regressiva em
 // "digitos de relogio", com uma barra de progresso dividida em 6
 // "horas" (12 AM ate' 6 AM). A cor vai de vermelho a dourado conforme
@@ -511,6 +1082,94 @@ void drawNightClock() {
     glEnd();
 }
 
+// --- Menus (inicial e de pausa) --------------------------------
+// Os dois usam a mesma tela: no MENU as opcoes sao Jogar/Sair; na
+// PAUSA sao Continuar/Reiniciar/Sair. As posicoes dos itens saem de
+// menuItemY(), usada tanto pra DESENHAR quanto pra detectar o mouse
+// em cima (menuItemAt), entao os dois sempre concordam.
+int menuCount() { return g_state == STATE_MENU ? 2 : 3; }
+
+const char* menuLabel(int i) {
+    if (g_state == STATE_MENU) return i == 0 ? "JOGAR" : "SAIR";
+    return i == 0 ? "CONTINUAR" : (i == 1 ? "REINICIAR" : "SAIR");
+}
+
+float menuItemY(int i) { return g_windowH * 0.50f - 62.0f * (float)i; } // y do centro (de baixo pra cima)
+
+// Qual item esta' sob o mouse (x,y em pixels da janela, y de CIMA pra baixo)? -1 = nenhum.
+int menuItemAt(int mx, int my) {
+    float gy = (float)g_windowH - (float)my;   // converte pro y de baixo pra cima
+    for (int i = 0; i < menuCount(); ++i) {
+        if (fabsf((float)mx - g_windowW * 0.5f) < 190.0f && fabsf(gy - menuItemY(i)) < 26.0f) return i;
+    }
+    return -1;
+}
+
+void activateMenu(int i) {
+    if (g_state == STATE_MENU) {
+        if (i == 0) { resetGame(); g_yawDeg = 0.0f; g_pitchDeg = 0.0f; }
+        else exit(0);
+    } else { // PAUSED
+        if (i == 0)      g_state = STATE_PLAYING;
+        else if (i == 1) resetGame();
+        else             exit(0);
+    }
+}
+
+void drawMenuScreen(bool title) {
+    const float t = g_stateTimer;
+    const float W = (float)g_windowW, H = (float)g_windowH;
+    float fade = clamp01(t / 0.4f);
+
+    glColor4f(0.0f, 0.0f, 0.0f, (title ? 0.55f : 0.70f) * fade);
+    fillRect(0.0f, 0.0f, W, H);
+    const float vc[4] = { 0.1f, 0.0f, 0.0f, 0.0f };
+    const float ve[4] = { 0.1f, 0.0f, 0.0f, 0.80f * fade };
+    drawRadial(vc, ve);
+
+    if (title) {
+        const char* name = "1 NOITE NO FREDERICO";
+        float h = fitStrokeHeight(GLUT_STROKE_ROMAN, name, H * 0.11f, W * 0.88f);
+        drawGlitchText(name, W * 0.5f, H * 0.76f, h, t, 0.90f, 0.08f, 0.06f);
+        glColor4f(0.75f, 0.72f, 0.72f, fade);
+        drawBitmapCentered(GLUT_BITMAP_HELVETICA_18, W * 0.5f, H * 0.66f, "Sobreviva ate as 6 da manha.");
+    } else {
+        const char* name = "PAUSADO";
+        float h = fitStrokeHeight(GLUT_STROKE_ROMAN, name, H * 0.11f, W * 0.6f);
+        glColor4f(0.8f, 0.8f, 0.8f, 0.25f * fade);
+        drawStrokeCentered(GLUT_STROKE_ROMAN, name, W * 0.5f, H * 0.76f, h, 9.0f);
+        glColor4f(0.92f, 0.92f, 0.92f, fade);
+        drawStrokeCentered(GLUT_STROKE_ROMAN, name, W * 0.5f, H * 0.76f, h, 3.5f);
+    }
+
+    // itens: o selecionado ganha caixa vermelha e setas "> <"
+    for (int i = 0; i < menuCount(); ++i) {
+        float y = menuItemY(i);
+        bool sel = (i == g_menuSel);
+        char label[48];
+        if (sel) {
+            glColor4f(0.45f, 0.02f, 0.02f, 0.35f * fade);
+            fillRect(W * 0.5f - 190.0f, y - 26.0f, W * 0.5f + 190.0f, y + 26.0f);
+            glLineWidth(1.5f);
+            glColor4f(0.9f, 0.15f, 0.1f, 0.8f * fade);
+            outlineRect(W * 0.5f - 190.0f, y - 26.0f, W * 0.5f + 190.0f, y + 26.0f);
+            std::snprintf(label, sizeof(label), "> %s <", menuLabel(i));
+            glColor4f(1.0f, 0.9f, 0.85f, fade);
+        } else {
+            std::snprintf(label, sizeof(label), "%s", menuLabel(i));
+            glColor4f(0.70f, 0.70f, 0.70f, 0.55f * fade);
+        }
+        drawStrokeCentered(GLUT_STROKE_ROMAN, label, W * 0.5f, y, 30.0f, sel ? 2.4f : 1.6f);
+    }
+
+    glColor4f(0.65f, 0.65f, 0.65f, fade);
+    drawBitmapCentered(GLUT_BITMAP_HELVETICA_12, W * 0.5f, H * 0.14f,
+                       "Mouse: olhar     F: lanterna (mire no monstro)     D: porta     C: monitor     P: pausa");
+    glColor4f(0.5f, 0.5f, 0.5f, fade);
+    drawBitmapCentered(GLUT_BITMAP_HELVETICA_12, W * 0.5f, H * 0.10f,
+                       "Setas ou W/S: escolher     Enter ou clique: confirmar     Esc: voltar");
+}
+
 // Tela de game over. Tudo e' funcao do tempo "t" desde que o estado
 // comecou (g_stateTimer), o que da' uma pequena sequencia animada:
 //   0.00 a 0.25 s : flash vermelho que some
@@ -518,9 +1177,6 @@ void drawNightClock() {
 //   a partir de 0.5 s : o titulo aparece tremendo e piscando
 //   a partir de 1.2 s : subtitulo e tempo sobrevivido surgem (fade-in)
 //   a partir de GAMEOVER_LOCK : aparece o "R - tentar de novo" piscando
-// O efeito de "tubo de TV com defeito" e' feito com numeros aleatorios:
-// desloca o titulo alguns pixels a cada frame, e de vez em quando faz
-// uma "rajada" de tremor forte e apaga o brilho por um instante.
 void drawGameOverScreen() {
     const float t = g_stateTimer;
     const float W = (float)g_windowW, H = (float)g_windowH;
@@ -539,26 +1195,9 @@ void drawGameOverScreen() {
     }
 
     if (t > 0.5f) {
-        float tt = t - 0.5f;
-        bool  burst = fmodf(tt, 1.7f) < 0.12f;       // 0.12 s de rajada a cada 1.7 s
-        float shake = burst ? 10.0f : 1.5f;          // amplitude do tremor em pixels
-        float ox = randRange(-shake, shake);
-        float oy = randRange(-shake, shake);
-        float alpha = 0.8f + 0.2f * sinf(tt * 25.0f);
-        if (rand() % 14 == 0) alpha *= 0.15f;        // ~1 frame em 14 quase apaga
-
         const char* title = "GAME OVER";
         float titleH = fitStrokeHeight(GLUT_STROKE_ROMAN, title, H * 0.20f, W * 0.85f);
-        float cx = W * 0.5f + ox, cy = H * 0.58f + oy;
-
-        glColor4f(0.6f, 0.0f, 0.0f, 0.30f * alpha);   // brilho (linha grossa translucida)
-        drawStrokeCentered(GLUT_STROKE_ROMAN, title, cx, cy, titleH, 9.0f);
-        glColor4f(0.95f, 0.05f, 0.05f, alpha);        // titulo em si
-        drawStrokeCentered(GLUT_STROKE_ROMAN, title, cx, cy, titleH, 4.0f);
-        if (burst) {                                  // "fantasma" branco deslocado nas rajadas
-            glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
-            drawStrokeCentered(GLUT_STROKE_ROMAN, title, cx - ox * 2.0f, cy + oy * 2.0f, titleH, 2.0f);
-        }
+        drawGlitchText(title, W * 0.5f, H * 0.58f, titleH, t - 0.5f, 0.95f, 0.05f, 0.05f);
 
         float subA = clamp01((t - 1.2f) / 1.0f);      // fade-in do subtitulo
         const char* sub = "O FREDERICO TE PEGOU...";
@@ -629,9 +1268,19 @@ void drawWinScreen() {
 void drawHud() {
     hudBegin();
     switch (g_state) {
+        case STATE_MENU:
+            drawMenuScreen(true);
+            break;
+        case STATE_PAUSED:
+            drawPowerBar();
+            drawNightClock();
+            drawMenuScreen(false);
+            break;
         case STATE_PLAYING:
             drawPowerBar();
             drawNightClock();
+            drawControlHints();
+            if (g_debug) drawDebugInfo();
             break;
         case STATE_JUMPSCARE:
             break; // tela limpa, so' o monstro na cara: mais impacto
@@ -646,7 +1295,7 @@ void drawHud() {
 }
 
 // ===============================================================
-// 6. DISPLAY
+// 7. DISPLAY
 // [Requisito C] Chamado pelo GLUT sempre que o timer pede um redesenho
 // (glutPostRedisplay). Monta a projecao, posiciona a camera e desenha
 // tudo, de tras pra frente: cena 3D primeiro, HUD 2D por cima.
@@ -665,37 +1314,68 @@ void display() {
     // [Requisito E] Camera em primeira pessoa. gluLookAt recebe onde o
     // olho esta', pra que ponto ele olha e qual direcao e' "pra cima".
     // O ponto alvo = olho + direcao do olhar (controlada pelo mouse).
+    // No modo foto a camera pode ser posicionada livremente.
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    Vector3 forward = computeForward();
-    Vector3 center(g_eye.x + forward.x, g_eye.y + forward.y, g_eye.z + forward.z);
+    Vector3 eye = g_eye;
+    Vector3 center;
+    if (g_camOverride) {
+        eye = g_ovEye;
+        center = g_ovCenter;
+    } else {
+        Vector3 forward = computeForward();
+        center = Vector3(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
+    }
 
     // No susto, o olhar do jogador e' "puxado" pra cara do monstro (como
     // se ele nao conseguisse desviar os olhos): o alvo da camera passa
     // gradualmente (lerp) do ponto onde ele olhava pra altura da cabeca do
     // monstro. Sem isso, com a camera baixa (sentado), a cabeca ficaria
     // fora da tela.
-    if (g_state == STATE_JUMPSCARE || g_state == STATE_GAME_OVER) {
-        Vector3 mp = currentMonsterPosition();
-        Vector3 face(mp.x, mp.y + 1.9f, mp.z);
+    bool lunging = (g_state == STATE_JUMPSCARE || g_state == STATE_GAME_OVER);
+    Vector3 monsterPos = currentMonsterPosition();
+    if (lunging) {
+        // Onde a cabeca esta' de verdade: o tronco tomba pra frente em torno
+        // do quadril (inclinacao = 10 + 45*progresso graus, igual ao enemy.cpp),
+        // entao a cabeca (1.44 m acima do quadril, que fica a 1.1 m do chao)
+        // sobe menos e avanca em direcao a camera.
+        float lean = (10.0f + 45.0f * clamp01(g_jumpscareProgress)) * DEG2RAD;
+        Vector3 face(monsterPos.x, 1.1f + 1.44f * cosf(lean), monsterPos.z + 1.44f * sinf(lean));
         float k = clamp01(g_jumpscareProgress * 2.5f);
         center = center + (face - center) * k;
     }
 
-    gluLookAt(g_eye.x, g_eye.y, g_eye.z,
+    gluLookAt(eye.x, eye.y, eye.z,
               center.x, center.y, center.z,
               0.0, 1.0, 0.0);
+
+    // Direcao (unitaria) pra onde a camera/lanterna apontam
+    Vector3 dir = center - eye;
+    float dl = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (dl > 0.0001f) dir = dir * (1.0f / dl);
 
     // [Requisito D/F] A lanterna e' atualizada logo apos a camera (ver
     // lighting.cpp): a posicao de uma luz e' transformada pela matriz
     // ATUAL, entao precisa ser definida depois do gluLookAt pra "grudar"
-    // na camera.
+    // na camera. Em seguida a transformamos num cone (spot) apontado pra dir.
     updateFlashlight(g_flashlightOn);
+    setupFlashlightSpot(dir);
 
-    // Moveis da sala. Vem ANTES das paredes porque tambem configuram a
-    // luz do monitor, que precisa estar ativa quando as paredes forem
-    // desenhadas. g_uiTime anima o ventilador e a tela do monitor.
-    drawRoomProps(g_uiTime);
+    // Modo foto: luz ambiente extra pra enxergar o cenario
+    GLfloat prevAmbient[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    bool ambientChanged = (g_photoActive && g_photoAmbient >= 0.0f);
+    if (ambientChanged) {
+        glGetFloatv(GL_LIGHT_MODEL_AMBIENT, prevAmbient);
+        const GLfloat a = g_photoAmbient;
+        const GLfloat amb[4] = { a, a, a, 1.0f };
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+    }
+
+    // Moveis da sala e do corredor. Vem ANTES das paredes porque tambem
+    // configuram as luzes extras (monitor e lampadas do corredor), que
+    // precisam estar ativas quando as paredes forem desenhadas. g_uiTime
+    // anima o ventilador e a tela; o monitor mostra a posicao do monstro.
+    drawRoomProps(g_uiTime, g_monitorOn, monsterPos);
 
     drawSecurityRoom();
     drawCorridor();
@@ -703,17 +1383,39 @@ void display() {
 
     // O monstro: posicao vem da curva de Bezier (ou do salto do susto),
     // g_walkTime anima as pernas/bracos e mouthOpen abre a boca no susto.
-    bool  lunging   = (g_state == STATE_JUMPSCARE || g_state == STATE_GAME_OVER);
-    Vector3 monsterPos = currentMonsterPosition();
-    float monsterYaw   = 180.0f; // o monstro sempre encara quem esta' olhando pra ele
-    float mouthOpen    = lunging ? g_jumpscareProgress : 0.05f;
-    Enemy::draw(monsterPos, monsterYaw, g_walkTime, mouthOpen);
+    // Quando o feixe da lanterna o acerta, ele "treme" (recuo).
+    Vector3 drawPos = monsterPos;
+    if (g_beamHit && g_state == STATE_PLAYING) {
+        drawPos.x += randRange(-0.03f, 0.03f);
+        drawPos.z += randRange(-0.03f, 0.03f);
+    }
+    float monsterYaw = 180.0f; // o monstro sempre encara quem esta' olhando pra ele
+    float mouthOpen  = lunging ? g_jumpscareProgress : 0.05f;
+    if (g_photoActive && g_photoMouth >= 0.0f) mouthOpen = g_photoMouth;
+    Enemy::draw(drawPos, monsterYaw, g_walkTime, mouthOpen);
 
     // Interruptor da porta (LED: verde = aberta, vermelho = fechada).
     // Vem depois das paredes porque o brilho do LED usa transparencia.
     drawDoorSwitch(g_doorClosing, g_power > 0.0f);
 
-    drawHud();
+    // Feixe visivel da lanterna: por ultimo na cena 3D (e' translucido).
+    if (g_flashlightOn && (g_state == STATE_PLAYING || g_state == STATE_PAUSED || g_photoActive)) {
+        drawFlashlightBeam(eye, dir, g_beamHit);
+    }
+
+    if (ambientChanged) glLightModelfv(GL_LIGHT_MODEL_AMBIENT, prevAmbient);
+
+    if (!g_photoActive || g_photoHud) drawHud();
+
+    // Captura de tela: F12 (manual) ou o modo foto (automatico)
+    if (g_screenshotRequested) {
+        g_screenshotRequested = false;
+        MAKE_DIR("capturas");
+        char path[64];
+        std::snprintf(path, sizeof(path), "capturas/captura_%03d.png", ++g_screenshotCount);
+        if (captureFrame(path)) std::printf("captura salva: %s\n", path);
+    }
+    if (g_photoActive) photoAfterRender();
 
     glutSwapBuffers(); // double buffering: mostra o quadro pronto de uma vez
 }
@@ -727,21 +1429,42 @@ void reshape(int w, int h) {
 }
 
 // ===============================================================
-// 7. ENTRADA (TECLADO E MOUSE)
+// 8. ENTRADA (TECLADO, SETAS E MOUSE)
 // ===============================================================
 
-// [Requisito D] Teclado. F liga/desliga a lanterna (GL_LIGHT0), D
-// abre/fecha a porta (translacao animada) e R reinicia a partida nas
-// telas de game over / vitoria. O comportamento de cada tecla depende
-// do estado atual do jogo.
+void pauseGame() {
+    g_state = STATE_PAUSED;
+    g_stateTimer = 0.0f;
+    g_menuSel = 0;
+}
+
+// [Requisito D] Teclado. Depende do estado atual do jogo:
+//   MENU / PAUSED : W/S escolhem, Enter/Espaco confirmam, Esc volta
+//   PLAYING       : F lanterna, D porta, C monitor, P ou Esc pausam
+//   GAME_OVER/WON : R recomeca, Esc sai
 void keyboard(unsigned char key, int, int) {
-    if (key == 27) { // ESC vale em qualquer estado
-        exit(0);
+    if (g_photoActive) return;
+
+    if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
+        int n = menuCount();
+        if (key == 27) {                                   // ESC
+            if (g_state == STATE_PAUSED) g_state = STATE_PLAYING; else exit(0);
+        } else if (key == 'p' || key == 'P') {
+            if (g_state == STATE_PAUSED) g_state = STATE_PLAYING;
+        } else if (key == 'w' || key == 'W') {
+            g_menuSel = (g_menuSel + n - 1) % n;
+        } else if (key == 's' || key == 'S') {
+            g_menuSel = (g_menuSel + 1) % n;
+        } else if (key == 13 || key == ' ') {              // Enter / Espaco
+            activateMenu(g_menuSel);
+        }
+        return;
     }
 
     // Nas telas de fim, so' o R (ou Enter) importa, e so' depois do
     // tempo de "trava", pra ninguem pular a tela sem querer.
     if (g_state == STATE_GAME_OVER || g_state == STATE_WON) {
+        if (key == 27) exit(0);
         float lock = (g_state == STATE_GAME_OVER) ? GAMEOVER_LOCK : WIN_LOCK;
         if ((key == 'r' || key == 'R' || key == 13) && g_stateTimer >= lock) {
             resetGame();
@@ -751,6 +1474,11 @@ void keyboard(unsigned char key, int, int) {
     if (g_state != STATE_PLAYING) return; // durante o jumpscare nao tem o que fazer
 
     switch (key) {
+        case 27:  // ESC
+        case 'p':
+        case 'P':
+            pauseGame();
+            break;
         case 'f':
         case 'F':
             // So' liga se ainda tiver energia; desligar sempre pode.
@@ -762,8 +1490,42 @@ void keyboard(unsigned char key, int, int) {
             if (g_doorClosing)       g_doorClosing = false;
             else if (g_power > 0.0f) g_doorClosing = true;
             break;
+        case 'c':
+        case 'C':
+            if (g_monitorOn)         g_monitorOn = false;
+            else if (g_power > 0.0f) g_monitorOn = true;
+            break;
         default:
             break;
+    }
+}
+
+// Teclas especiais: setas navegam no menu; F12 tira uma captura de tela;
+// F3 liga/desliga o painel de depuracao.
+void special(int key, int, int) {
+    if (key == GLUT_KEY_F12) {
+        g_screenshotRequested = true;
+        return;
+    }
+    if (key == GLUT_KEY_F3) {
+        g_debug = !g_debug;
+        return;
+    }
+    if (g_photoActive) return;
+    if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
+        int n = menuCount();
+        if (key == GLUT_KEY_UP)        g_menuSel = (g_menuSel + n - 1) % n;
+        else if (key == GLUT_KEY_DOWN) g_menuSel = (g_menuSel + 1) % n;
+    }
+}
+
+// Clique do mouse: so' interessa nos menus (botao esquerdo em cima de um item).
+void mouse(int button, int st, int x, int y) {
+    if (g_photoActive) return;
+    if (button != GLUT_LEFT_BUTTON || st != GLUT_DOWN) return;
+    if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
+        int i = menuItemAt(x, y);
+        if (i >= 0) { g_menuSel = i; activateMenu(i); }
     }
 }
 
@@ -771,11 +1533,19 @@ void keyboard(unsigned char key, int, int) {
 // o cursor e' sempre recentralizado (glutWarpPointer) e o quanto ele
 // se afastou do centro (dx, dy) vira rotacao de camera (yaw/pitch).
 // Os limites (clamp) simulam o limite de movimento do pescoco humano.
+// Nos menus o cursor fica livre e o mouse so' seleciona itens.
 void passiveMotion(int x, int y) {
     // Quando NOS movemos o cursor de volta ao centro, o GLUT gera um
     // evento de movimento falso. A flag serve pra ignora-lo.
     if (g_warping) {
         g_warping = false;
+        return;
+    }
+    if (g_photoActive) return;
+
+    if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
+        int i = menuItemAt(x, y);
+        if (i >= 0) g_menuSel = i;
         return;
     }
 
@@ -795,16 +1565,17 @@ void passiveMotion(int x, int y) {
 }
 
 // ===============================================================
-// 8. TIMER (LOGICA DO JOGO)
+// 9. TIMER (LOGICA DO JOGO)
 // [Requisito C] Roda a cada ~16 ms (glutTimerFunc), independente de
 // input ou de desenho. Faz TODA a atualizacao do jogo, na ordem:
 //   1. calcula dt (tempo real desde o frame anterior)
-//   2. anima a porta
-//   3. conforme o estado:
-//      PLAYING   -> cronometro, bateria, sprint, monstro, checa fim
+//   2. mostra/esconde o cursor conforme o estado
+//   3. anima a porta
+//   4. conforme o estado:
+//      PLAYING   -> cronometro, bateria, sprint, mira, monstro, checa fim
 //      JUMPSCARE -> anima o salto do monstro
-//      GAME_OVER / WON -> so' avanca o relogio da tela
-//   4. pede redesenho e se reagenda
+//      MENU / PAUSED / GAME_OVER / WON -> so' avanca o relogio da tela
+//   5. pede redesenho e se reagenda
 // ===============================================================
 void timerFunc(int) {
     // --- 1. delta time ---
@@ -814,33 +1585,57 @@ void timerFunc(int) {
     if (dt > 0.1f) dt = 0.1f; // evita saltos grandes (ex: janela minimizada/arrastada)
     if (dt < 0.0f) dt = 0.0f;
 
+    // Modo foto: o "relogio" fica fixo e nada da logica roda
+    if (g_photoActive) {
+        g_uiTime = g_photoTime;
+        glutPostRedisplay();
+        glutTimerFunc(16, timerFunc, 0);
+        return;
+    }
+
     g_uiTime += dt;
 
-    // --- 2. Porta: anima suavemente ate' a posicao alvo ---
+    // --- 2. Cursor: aparece so' nos menus; ao voltar pro jogo some e
+    // recentraliza (senao a camera daria um "pulo") ---
+    bool wantCursor = (g_state == STATE_MENU || g_state == STATE_PAUSED);
+    if (wantCursor != g_cursorShown) {
+        g_cursorShown = wantCursor;
+        glutSetCursor(wantCursor ? GLUT_CURSOR_LEFT_ARROW : GLUT_CURSOR_NONE);
+        if (!wantCursor) {
+            g_warping = true;
+            glutWarpPointer(g_windowW / 2, g_windowH / 2);
+        }
+    }
+
+    // --- 3. Porta: anima suavemente ate' a posicao alvo ---
     // Em vez de teleportar, move DOOR_SPEED * dt por frame na direcao do
     // alvo, sem passar dele (fminf/fmaxf).
     float doorTarget = g_doorClosing ? Scene::DOORWAY_HEIGHT : 0.0f;
-    if (g_doorOffsetY < doorTarget)
-        g_doorOffsetY = fminf(g_doorOffsetY + DOOR_SPEED * dt, doorTarget);
-    else if (g_doorOffsetY > doorTarget)
-        g_doorOffsetY = fmaxf(g_doorOffsetY - DOOR_SPEED * dt, doorTarget);
+    if (g_state != STATE_PAUSED) {
+        if (g_doorOffsetY < doorTarget)
+            g_doorOffsetY = fminf(g_doorOffsetY + DOOR_SPEED * dt, doorTarget);
+        else if (g_doorOffsetY > doorTarget)
+            g_doorOffsetY = fmaxf(g_doorOffsetY - DOOR_SPEED * dt, doorTarget);
+    }
     // A porta so' "veda" quando chegou ao chao (o 0.01 e' folga numerica).
     bool doorSealed = g_doorOffsetY >= (Scene::DOORWAY_HEIGHT - 0.01f);
 
-    // --- 3. Logica por estado ---
+    // --- 4. Logica por estado ---
     if (g_state == STATE_PLAYING) {
         g_nightTime += dt;
         g_walkTime  += dt * (g_sprinting ? SPRINT_ANIM_BOOST : 1.0f);
 
-        // Bateria: a lanterna e a porta fechada consomem energia. Ao
-        // zerar, as duas param de funcionar e nao voltam mais.
+        // Bateria: lanterna, porta fechada e monitor consomem energia. Ao
+        // zerar, tudo para de funcionar e nao volta mais.
         float drain = 0.0f;
         if (g_flashlightOn) drain += POWER_DRAIN_LIGHT;
         if (g_doorClosing)  drain += POWER_DRAIN_DOOR;
+        if (g_monitorOn)    drain += POWER_DRAIN_MONITOR;
         g_power -= drain * dt;
         if (g_power <= 0.0f) {
             g_power        = 0.0f;
             g_flashlightOn = false;
+            g_monitorOn    = false;
             g_doorClosing  = false; // a porta comeca a abrir sozinha
         }
 
@@ -861,21 +1656,29 @@ void timerFunc(int) {
             }
         }
 
+        // MIRA: a lanterna so' afasta o monstro se o feixe estiver
+        // apontado pra ele. Usamos a mesma direcao da camera que o
+        // display usa pro cone de luz.
+        Vector3 mp = currentMonsterPosition();
+        Vector3 monsterCenter(mp.x, mp.y + MONSTER_CENTER_Y, mp.z);
+        g_beamHit = g_flashlightOn &&
+                    flashlightHits(g_eye, computeForward(), monsterCenter, MONSTER_HIT_RADIUS);
+
         // Movimento do monstro. "rate" e' a variacao do parametro t da
         // curva por segundo: positivo = se aproxima, negativo = recua.
-        //   porta vedada        -> parado (contido do lado de fora)
-        //   lanterna acesa      -> recua (RETREAT_RATE)
-        //   lanterna apagada    -> avanca (caminhada normal)
-        //   sprint              -> avanca rapido; a lanterna so' desconta
-        //                          RETREAT_RATE dessa velocidade
+        //   porta vedada            -> parado (contido do lado de fora)
+        //   lanterna acesa E mirada -> recua (RETREAT_RATE)
+        //   lanterna apagada ou fora de mira -> avanca (caminhada normal)
+        //   sprint                  -> avanca rapido; o feixe so' desconta
+        //                              RETREAT_RATE dessa velocidade
         float rate;
         if (doorSealed) {
             rate = 0.0f;
         } else {
             float advance = g_sprinting ? SPRINT_RATE
                                         : ADVANCE_RATE_BASE * currentSpeedMultiplier();
-            if (g_flashlightOn) rate = g_sprinting ? (advance - RETREAT_RATE) : -RETREAT_RATE;
-            else                rate = advance;
+            if (g_beamHit) rate = g_sprinting ? (advance - RETREAT_RATE) : -RETREAT_RATE;
+            else           rate = advance;
         }
         g_monsterT += rate * dt;
 
@@ -899,6 +1702,7 @@ void timerFunc(int) {
         if (g_monsterT >= 1.0f && !doorSealed) {
             g_state             = STATE_JUMPSCARE;
             g_jumpscareProgress = 0.0f;
+            g_beamHit           = false;
         } else if (g_nightTime >= NIGHT_DURATION) {
             g_nightTime  = NIGHT_DURATION;
             g_state      = STATE_WON;
@@ -915,10 +1719,10 @@ void timerFunc(int) {
             g_stateTimer        = 0.0f;
         }
     } else {
-        g_stateTimer += dt; // GAME_OVER / WON: so' avanca o relogio da animacao da tela
+        g_stateTimer += dt; // MENU / PAUSED / GAME_OVER / WON: so' avanca o relogio da animacao da tela
     }
 
-    // --- 4. Redesenha e se reagenda (16 ms ~ 60 quadros por segundo) ---
+    // --- 5. Redesenha e se reagenda (16 ms ~ 60 quadros por segundo) ---
     glutPostRedisplay();
     glutTimerFunc(16, timerFunc, 0);
 }
@@ -931,10 +1735,17 @@ void initGL() {
 } // namespace
 
 // ===============================================================
-// 9. MAIN
+// 10. MAIN
 // Cria a janela, registra os callbacks e entrega o controle ao GLUT.
+// Argumento opcional: --fotos gera as imagens em docs/imagens/ e sai.
 // ===============================================================
 int main(int argc, char** argv) {
+    bool photoMode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--fotos") == 0) photoMode = true;
+    }
+    if (photoMode) { g_windowW = 1280; g_windowH = 720; } // 16:9 pras imagens do README
+
     glutInit(&argc, argv);
     // DOUBLE = dois buffers (desenha num, mostra o outro: sem flicker);
     // RGB = cores; DEPTH = z-buffer pra esconder o que esta' atras.
@@ -945,34 +1756,38 @@ int main(int argc, char** argv) {
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
+    glutSpecialFunc(special);
+    glutMouseFunc(mouse);
     glutPassiveMotionFunc(passiveMotion);
     glutIgnoreKeyRepeat(1);              // segurar a tecla nao repete o evento
-    glutSetCursor(GLUT_CURSOR_NONE);     // esconde o cursor (o mouse so' gira a camera)
-
-    // Centraliza o cursor antes do primeiro frame para nao gerar um
-    // "pulo" na camera assim que a janela abre.
-    g_warping = true;
-    glutWarpPointer(g_windowW / 2, g_windowH / 2);
+    glutSetCursor(GLUT_CURSOR_NONE);     // o timer mostra o cursor so' nos menus
 
     initGL();
 
     std::srand((unsigned int)std::time(0)); // semente aleatoria: cada partida e' diferente
     resetGame();
+    g_state = STATE_MENU;                // o jogo abre no menu inicial
+    g_stateTimer = 0.0f;
 
     g_lastTimeMs = glutGet(GLUT_ELAPSED_TIME);
     glutTimerFunc(16, timerFunc, 0);     // dispara o primeiro tick do laco do jogo
 
-    std::printf("=== 1 Noite no Frederico ===\n");
-    std::printf("Sobreviva ate' as 6 da manha (5 minutos).\n\n");
-    std::printf("Controles:\n");
-    std::printf("  Mouse - olhar ao redor (limitado, como um pescoco humano)\n");
-    std::printf("  F     - ligar/desligar a lanterna (gasta energia)\n");
-    std::printf("  D     - fechar/abrir a porta de seguranca (gasta energia bem mais rapido)\n");
-    std::printf("  R     - reiniciar (nas telas de game over / vitoria)\n");
-    std::printf("  ESC   - sair\n\n");
-    std::printf("A bateria e' compartilhada entre a lanterna e a porta. Quando\n");
-    std::printf("acaba, as duas param de funcionar de vez. Fique de olho: de vez\n");
-    std::printf("em quando ele dispara.\n");
+    if (photoMode) {
+        std::printf("Modo foto: gerando imagens em docs/imagens/ ...\n");
+        startPhotoSession(true);
+    } else {
+        std::printf("=== 1 Noite no Frederico ===\n");
+        std::printf("Sobreviva ate' as 6 da manha (5 minutos).\n\n");
+        std::printf("Controles:\n");
+        std::printf("  Mouse - olhar ao redor (limitado, como um pescoco humano)\n");
+        std::printf("  F     - lanterna (so' afasta o monstro se o feixe apontar pra ele)\n");
+        std::printf("  D     - fechar/abrir a porta (gasta energia bem mais rapido)\n");
+        std::printf("  C     - ligar/desligar o monitor (mostra onde ele esta')\n");
+        std::printf("  P/Esc - pausar\n");
+        std::printf("  F12   - captura de tela (pasta capturas/)   F3 - painel de debug\n");
+        std::printf("A bateria e' compartilhada. Quando acaba, tudo para de vez.\n");
+        std::printf("Fique de olho: de vez em quando ele dispara.\n");
+    }
 
     glutMainLoop(); // entrega o controle ao GLUT; nunca retorna
     return 0;

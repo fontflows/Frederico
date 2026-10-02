@@ -106,7 +106,11 @@ static float hash2(int i, int j) {
     return (float)(n & 0x7fffffffu) / 2147483647.0f;
 }
 
+static float clampf01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
 static float lenOf(const Vector3& a) { return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z); }
+
+// (definida mais abaixo, na parte do corredor; o monitor tambem usa)
+static float lampLevel(float t, float phase);
 
 // Caixa (paralelepipedo) centrada em (cx,cy,cz) com dimensoes
 // (sx,sy,sz): um cubo unitario do GLUT esticado por glScalef e movido
@@ -458,12 +462,13 @@ void drawDoorSwitch(bool doorClosing, bool hasPower) {
 
 // Luz do monitor: uma luz pontual azul-esverdeada, fraca e com
 // atenuacao (some rapido com a distancia), que tremula. Faz a mesa e o
-// teclado receberem um brilho de tela no escuro.
+// teclado receberem um brilho de tela no escuro. Com o monitor desligado
+// a intensidade e' zero.
 // Formula da atenuacao do OpenGL: 1 / (kc + kl*d + kq*d*d).
 // Como o glLight transforma a posicao pela matriz atual, esta funcao
 // deve ser chamada depois do gluLookAt (o display ja faz isso).
-static void setupMonitorLight(float x, float y, float z, float time) {
-    float flick = 0.85f + 0.15f * sinf(time * 37.0f); // tremulacao rapida
+static void setupMonitorLight(float x, float y, float z, float time, bool on) {
+    float flick = (on ? 1.0f : 0.0f) * (0.85f + 0.15f * sinf(time * 37.0f)); // tremulacao rapida
     const GLfloat pos[]     = { x, y, z, 1.0f };       // w=1: luz pontual (nao direcional)
     const GLfloat diffuse[] = { 0.15f * flick, 0.75f * flick, 0.60f * flick, 1.0f };
     const GLfloat none[]    = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -478,10 +483,15 @@ static void setupMonitorLight(float x, float y, float z, float time) {
 }
 
 // Computador antigo (monitor de tubo + teclado + mouse), na origem do
-// sistema local, com a tela virada pra +Z. A tela e' emissiva e mostra
-// uma "camera de seguranca": um corredor em perspectiva desenhado com
-// linhas, mais um ponto vermelho de gravacao (REC) que pisca.
-static void drawComputer(float time) {
+// sistema local, com a tela virada pra +Z.
+// Desligado: tela apagada. Ligado: mostra um MAPA do corredor visto de
+// cima, com o fundo a' esquerda e a sua porta a' direita:
+//   - o ponto vermelho e' o monstro (f = quao perto da porta, 0 a 1;
+//     lateral = posicao esquerda/direita no corredor, -1 a 1);
+//   - os quadradinhos amarelos sao as lampadas, piscando de verdade;
+//   - "chiado" (pontinhos aleatorios) aumenta conforme ele se aproxima;
+//   - uma linha de varredura sobe e desce, e o ponto REC pisca.
+static void drawComputer(float time, bool on, float f, float lateral) {
     const float top = 0.75f; // altura do tampo da mesa
 
     setPaint(0.55f, 0.53f, 0.46f);                          // bege gasto
@@ -499,10 +509,11 @@ static void drawComputer(float time) {
     const float sx0 = -0.19f, sx1 = 0.19f, sy0 = 0.93f, sy1 = 1.17f;
     float flick = 0.85f + 0.15f * sinf(time * 37.0f);
 
-    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT);
+    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
 
-    glColor3f(0.03f * flick, 0.16f * flick, 0.12f * flick);  // fundo da tela
+    if (on) glColor3f(0.03f * flick, 0.16f * flick, 0.12f * flick);  // fundo da tela
+    else    glColor3f(0.010f, 0.015f, 0.012f);                       // tela apagada
     glBegin(GL_QUADS);
         glVertex3f(sx0, sy0, sz);
         glVertex3f(sx1, sy0, sz);
@@ -510,34 +521,83 @@ static void drawComputer(float time) {
         glVertex3f(sx0, sy1, sz);
     glEnd();
 
-    // Corredor em perspectiva: retangulo pequeno no meio ligado aos
-    // cantos da tela. (Fuga central = sensacao de profundidade.)
-    const float lz = sz + 0.002f;
-    const float ix0 = -0.05f, ix1 = 0.05f, iy0 = 1.015f, iy1 = 1.085f;
-    glLineWidth(1.5f);
-    glColor3f(0.25f * flick, 0.95f * flick, 0.60f * flick);
-    glBegin(GL_LINES);
-        glVertex3f(sx0, sy0, lz); glVertex3f(ix0, iy0, lz);
-        glVertex3f(sx1, sy0, lz); glVertex3f(ix1, iy0, lz);
-        glVertex3f(sx1, sy1, lz); glVertex3f(ix1, iy1, lz);
-        glVertex3f(sx0, sy1, lz); glVertex3f(ix0, iy1, lz);
-    glEnd();
-    glBegin(GL_LINE_LOOP);
-        glVertex3f(ix0, iy0, lz);
-        glVertex3f(ix1, iy0, lz);
-        glVertex3f(ix1, iy1, lz);
-        glVertex3f(ix0, iy1, lz);
-    glEnd();
+    if (on) {
+        const float lz = sz + 0.002f;                        // camada de cima da tela
+        const float mx0 = -0.17f, mx1 = 0.17f;              // fundo do corredor (esq.) e porta (dir.)
+        const float my = 1.05f, mh = 0.055f;                // eixo e meia largura do mapa
+        glColor3f(0.25f * flick, 0.95f * flick, 0.60f * flick);
 
-    // ponto vermelho "REC": aceso 0.7 s a cada 1.2 s (fmodf = resto da divisao)
-    if (fmodf(time, 1.2f) < 0.7f) {
-        glColor3f(1.0f, 0.1f, 0.1f);
-        glBegin(GL_QUADS);
-            glVertex3f(-0.175f, 1.135f, lz);
-            glVertex3f(-0.150f, 1.135f, lz);
-            glVertex3f(-0.150f, 1.160f, lz);
-            glVertex3f(-0.175f, 1.160f, lz);
+        // paredes do corredor (2 linhas), fundo (esq.) e a sua porta (dir., mais grossa)
+        glLineWidth(1.5f);
+        glBegin(GL_LINES);
+            glVertex3f(mx0, my + mh, lz); glVertex3f(mx1, my + mh, lz);
+            glVertex3f(mx0, my - mh, lz); glVertex3f(mx1, my - mh, lz);
+            glVertex3f(mx0, my - mh, lz); glVertex3f(mx0, my + mh, lz);
         glEnd();
+        glLineWidth(3.0f);
+        glBegin(GL_LINES);
+            glVertex3f(mx1, my - mh, lz); glVertex3f(mx1, my + mh, lz);
+        glEnd();
+
+        // lampadas do corredor: o brilho de cada uma segue o nivel real da piscada
+        glBegin(GL_QUADS);
+        for (int w = 0; w < 2; ++w) {
+            float lf = (w == 0) ? 0.67f : 0.30f;             // posicao ao longo do corredor (0 = fundo)
+            float lv = lampLevel(time, w == 0 ? 0.0f : 3.1f);
+            float x = mx0 + (mx1 - mx0) * lf;
+            glColor3f((0.15f + 0.85f * lv) * 0.9f, (0.15f + 0.85f * lv) * 0.8f, 0.05f);
+            glVertex3f(x - 0.007f, my + mh + 0.010f, lz);
+            glVertex3f(x + 0.007f, my + mh + 0.010f, lz);
+            glVertex3f(x + 0.007f, my + mh + 0.024f, lz);
+            glVertex3f(x - 0.007f, my + mh + 0.024f, lz);
+        }
+        glEnd();
+
+        // o monstro: ponto vermelho que pulsa
+        float bx = mx0 + (mx1 - mx0) * f;
+        float by = my + lateral * mh * 0.8f;
+        float bs = 0.011f + 0.003f * sinf(time * 8.0f);
+        glColor3f(1.0f, 0.12f, 0.08f);
+        glBegin(GL_QUADS);
+            glVertex3f(bx - bs, by - bs, lz + 0.001f);
+            glVertex3f(bx + bs, by - bs, lz + 0.001f);
+            glVertex3f(bx + bs, by + bs, lz + 0.001f);
+            glVertex3f(bx - bs, by + bs, lz + 0.001f);
+        glEnd();
+
+        // chiado: mais forte quanto mais perto ele esta'. Posicoes vem de
+        // hash2 trocado 24 vezes por segundo, entao o chiado "cintila".
+        float closeness = clampf01((f - 0.6f) * 2.5f);
+        int dots = 8 + (int)(70.0f * closeness);
+        int tick = (int)(time * 24.0f);
+        glPointSize(2.0f);
+        glBegin(GL_POINTS);
+        for (int k = 0; k < dots; ++k) {
+            float c = 0.3f + 0.7f * hash2(k, tick + 3);
+            glColor3f(0.2f * c, 0.9f * c, 0.6f * c);
+            glVertex3f(sx0 + (sx1 - sx0) * hash2(k * 7 + 1, tick),
+                       sy0 + (sy1 - sy0) * hash2(k * 13 + 5, tick + 99), lz);
+        }
+        glEnd();
+
+        // linha de varredura percorrendo a tela
+        float sy = sy0 + (sy1 - sy0) * fmodf(time * 0.35f, 1.0f);
+        glLineWidth(1.0f);
+        glColor3f(0.10f * flick, 0.45f * flick, 0.30f * flick);
+        glBegin(GL_LINES);
+            glVertex3f(sx0, sy, lz); glVertex3f(sx1, sy, lz);
+        glEnd();
+
+        // ponto vermelho "REC": aceso 0.7 s a cada 1.2 s (fmodf = resto da divisao)
+        if (fmodf(time, 1.2f) < 0.7f) {
+            glColor3f(1.0f, 0.1f, 0.1f);
+            glBegin(GL_QUADS);
+                glVertex3f(-0.175f, 1.135f, lz);
+                glVertex3f(-0.150f, 1.135f, lz);
+                glVertex3f(-0.150f, 1.160f, lz);
+                glVertex3f(-0.175f, 1.160f, lz);
+            glEnd();
+        }
     }
     glPopAttrib();
 }
@@ -730,7 +790,7 @@ static void drawDesk(float w, float d) {
 // e 45 cm acima do tampo, o que da' a sensacao de estar sentado atras
 // dela. O centro da mesa fica livre pra enxergar o corredor: o monitor
 // fica a' esquerda (virado um pouco pro jogador) e o ventilador a' direita.
-static void drawFrontDesk(float zc, float time) {
+static void drawFrontDesk(float zc, float time, bool monitorOn, float f, float lateral) {
     float w = fminf(2.2f, 2.0f * ROOM_HALF_WIDTH - 0.8f);
 
     glPushMatrix();
@@ -741,7 +801,7 @@ static void drawFrontDesk(float zc, float time) {
     glPushMatrix();                                  // computador (filho da mesa)
         glTranslatef(-0.65f, 0.0f, -0.05f);
         glRotatef(14.0f, 0.0f, 1.0f, 0.0f);          // gira a tela na direcao do jogador
-        drawComputer(time);
+        drawComputer(time, monitorOn, f, lateral);
     glPopMatrix();
 
     glPushMatrix();                                  // ventilador (filho da mesa)
@@ -1019,9 +1079,10 @@ static void drawCorridorProps(float time) {
 // Mobilia a sala e o corredor e configura as luzes extras (monitor e
 // lampadas do corredor). E' chamada ANTES das paredes no display, porque
 // as luzes precisam estar ligadas quando as paredes forem desenhadas.
-// Todas as posicoes saem das constantes da sala (ROOM_*), entao os
-// moveis acompanham se as dimensoes mudarem.
-void drawRoomProps(float time) {
+// monitorOn = monitor ligado; monsterPos = onde o monstro esta' (o mapa
+// da tela mostra isso). Todas as posicoes saem das constantes da sala
+// (ROOM_*), entao os moveis acompanham se as dimensoes mudarem.
+void drawRoomProps(float time, bool monitorOn, const Vector3& monsterPos) {
     // O GL_NORMALIZE faz o OpenGL refazer o comprimento das normais
     // depois de glScalef nao uniformes (as caixas esticadas); sem ele a
     // iluminacao dessas faces sairia errada.
@@ -1031,13 +1092,20 @@ void drawRoomProps(float time) {
     const float sideDeskX  = -ROOM_HALF_WIDTH + 0.38f;  // mesa lateral quase encostada na parede
     const float frontDeskZ = PLAYER_EYE_Z - 1.2f;       // borda da mesa a ~0.85 m dos olhos
 
+    // posicao do monstro no mapa do monitor: f = 0 no fundo do corredor,
+    // 1 na porta; lateral = -1 (parede esquerda) a 1 (direita)
+    float f = clampf01((monsterPos.z - CORRIDOR_FAR_Z) / (ROOM_FRONT_Z - CORRIDOR_FAR_Z));
+    float lateral = monsterPos.x / CORRIDOR_HALF_W;
+    if (lateral < -1.0f) lateral = -1.0f;
+    if (lateral >  1.0f) lateral =  1.0f;
+
     // brilho do monitor: um pouco a' frente da tela, do lado do jogador
-    setupMonitorLight(-0.50f, 1.05f, frontDeskZ + 0.35f, time);
+    setupMonitorLight(-0.50f, 1.05f, frontDeskZ + 0.35f, time, monitorOn);
 
     drawRug();
     drawTrim();
     drawDoorFrame();
-    drawFrontDesk(frontDeskZ, time);
+    drawFrontDesk(frontDeskZ, time, monitorOn, f, lateral);
     drawSideDesk(sideDeskX, zMid);
     drawCabinet(ROOM_HALF_WIDTH - 0.32f, ROOM_FRONT_Z + 1.5f);
     drawCorridorProps(time);

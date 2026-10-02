@@ -1,5 +1,6 @@
 #ifndef SCENE_BUILDER_H
 #define SCENE_BUILDER_H
+#include "bezier.h"
 
 // ============================================================
 // [Requisito A] Modelagem de Objetos 3D com Primitivas
@@ -39,7 +40,7 @@ void drawDoor(float doorOffsetY);
 // com computador, ventilador e poster, e armario). time e' o tempo em
 // segundos e anima o ventilador e a tela do monitor. Tambem configura a
 // luz do monitor, entao deve ser chamada antes das paredes.
-void drawRoomProps(float time);
+void drawRoomProps(float time, bool monitorOn, const Vector3& monsterPos);
 
 // Desenha o interruptor da porta, ao lado da abertura. doorClosing indica
 // se a porta esta' fechada (define a posicao da alavanca e a cor do LED:

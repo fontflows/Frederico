@@ -395,7 +395,8 @@ namespace {
         ball(0.0f, -0.015f, -0.48f, 0.05f, 0.035f, 0.04f);
         shine(0.0f, 0.0f);
         paint(BLOOD);                                                  // sangue no focinho
-        box(0.0f, -0.12f, -0.482f, 0.26f, 0.07f, 0.004f);
+        ball( 0.05f, -0.11f, -0.482f, 0.09f, 0.035f, 0.004f);
+        ball(-0.10f, -0.07f, -0.482f, 0.04f, 0.050f, 0.004f);
 
         // --- olhos: orbita escura, globo sujo e pupila vermelha ---
         for (int side = -1; side <= 1; side += 2) {
@@ -425,8 +426,10 @@ namespace {
         ball(-0.16f,  0.18f, -0.20f, 0.04f, 0.04f, 0.02f);
 
         // --- interior escuro da boca (entre o focinho e a mandibula) ---
+        // A caixa fica ATRAS da fileira de dentes (z entre -0.30 e -0.10);
+        // se ela comecasse na frente dos dentes, esconderia todos eles.
         paint(DARK);
-        box(0.0f, -0.18f - gap * 0.5f, -0.28f, 0.30f, gap, 0.32f);
+        box(0.0f, -0.18f - gap * 0.5f, -0.20f, 0.30f, gap, 0.20f);
 
         // --- dentes de cima: 8 cones irregulares, 2 presas longas ---
         // Ficam numa curva em "U" (z = -0.42 + 5*x*x) acompanhando o focinho.
