@@ -10,6 +10,7 @@
 //   E - Camera e perspectiva                         -> display() (gluPerspective/gluLookAt)
 //   F - Iluminacao                                   -> lighting.*, lanterna (spot), nevoa, bateria baixa aqui
 //   H - Texturas (procedurais)                       -> textures.*, aplicadas em scene_builder.cpp
+//   I - Atmosfera (vinheta, granulado, balanco de camera) -> computeSway(), drawAtmosphere()
 //   G - Curvas parametricas (Bezier)                 -> bezier.*, usado em currentMonsterPosition()
 //
 // ------------------------------------------------------------
@@ -140,6 +141,13 @@ const float FLASH_LOW_FRAC = 0.25f;
 // resta ~80%, a 20 m ~45% e no fundo do corredor (~22 m) ~37%.
 const float FOG_DENSITY = 0.045f;
 
+// Atmosfera. O "perigo" (g_danger, 0 a 1) sobe quando o monstro se
+// aproxima, quando ele esta' em sprint e quando a bateria esta' acabando;
+// e' ele que intensifica a vinheta, o granulado, o balanco da camera e a
+// nevoa. VIGNETTE_BASE e GRAIN_BASE sao os valores com perigo zero.
+const float VIGNETTE_BASE = 0.30f;  // escurecimento das bordas da tela (0 a 1)
+const float GRAIN_BASE    = 0.045f; // forca do granulado de filme (0 a 1)
+
 // Dificuldade progressiva: o monstro fica mais rapido conforme a noite
 // avanca (de 1.0x ate' SPEED_RAMP_END) e a velocidade oscila entre
 // JITTER_MIN e JITTER_MAX, sorteada de novo toda vez que ele e'
@@ -194,6 +202,8 @@ bool  g_debug        = false; // painel de depuracao (F3)
 float g_flashLevel   = 1.0f;  // 0..1: quanto a lanterna esta' funcionando (cai com bateria baixa)
 GLfloat g_flashBase[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // cor original da luz da lanterna (lida do lighting.cpp)
 bool  g_flashBaseCached = false;
+float g_danger       = 0.0f;  // 0 = calmo, 1 = perigo maximo (alimenta a atmosfera)
+GLuint g_grainTex    = 0;     // textura de ruido do granulado
 
 // Porta: g_doorClosing e' o que o jogador PEDIU; g_doorOffsetY e' onde a
 // porta REALMENTE esta' (ela anima suavemente ate' o alvo).
@@ -243,6 +253,12 @@ float g_photoTime     = 2.0f;    // "relogio" fixo da foto (controla piscadas e 
 float clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
 float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
+// Degrau suave: 0 antes de a, 1 depois de b, curva em S no meio.
+float smooth01(float a, float b, float x) {
+    float t = clamp01((x - a) / (b - a));
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // Interpolacao linear: t=0 devolve a, t=1 devolve b, valores no meio
 // misturam proporcionalmente. Usada nas cores e nas rampas.
 float lerpf(float a, float b, float t) { return a + (b - a) * t; }
@@ -290,6 +306,7 @@ void resetGame() {
     g_flashlightOn      = false;
     g_monitorOn         = false;
     g_beamHit           = false;
+    g_danger            = 0.0f;
     g_doorClosing       = false;
     g_doorOffsetY       = 0.0f;
 
@@ -311,9 +328,11 @@ void resetGame() {
 // [Requisito E] Direcao "para frente" da camera a partir de yaw/pitch
 // (controlados pelo mouse). Sao coordenadas esfericas convertidas em
 // vetor: yaw=0/pitch=0 aponta para -Z (a abertura da sala / corredor).
-Vector3 computeForward() {
-    float yawRad   = g_yawDeg   * DEG2RAD;
-    float pitchRad = g_pitchDeg * DEG2RAD;
+// dyaw/dpitch: deslocamento extra em graus (usado so' pelo balanco visual
+// da camera; a mira da lanterna usa os valores sem balanco).
+Vector3 computeForward(float dyaw = 0.0f, float dpitch = 0.0f) {
+    float yawRad   = (g_yawDeg   + dyaw)   * DEG2RAD;
+    float pitchRad = (g_pitchDeg + dpitch) * DEG2RAD;
     Vector3 f;
     f.x = sinf(yawRad) * cosf(pitchRad);
     f.y = sinf(pitchRad);
@@ -721,11 +740,11 @@ bool captureFrame(const char* path) {
 // proxima. Cada foto usa um "relogio" fixo (g_photoTime) pra que as
 // lampadas e o ventilador saiam sempre na mesma pose, e uma luz ambiente
 // extra opcional pra enxergar o cenario (no jogo normal e' quase breu).
-const int NUM_SHOTS = 13;
+const int NUM_SHOTS = 14;
 const char* SHOT_NAMES[NUM_SHOTS] = {
     "01_pov_jogador", "02_corredor", "03_corredor_piscando", "04_monstro_corpo",
     "05_monstro_rosto", "06_sala_geral", "07_mesa_monitor", "08_porta",
-    "09_susto", "10_game_over", "11_menu", "12_vitoria", "13_lanterna_fraca"
+    "09_susto", "10_game_over", "11_menu", "12_vitoria", "13_lanterna_fraca", "14_perigo"
 };
 
 void setCam(const Vector3& e, const Vector3& c) {
@@ -741,6 +760,7 @@ void applyShot(int i) {
     g_photoMouth = -1.0f;
     g_photoHud = false;
     g_photoTime = 2.0f;
+    g_danger = 0.0f;
     g_walkTime = 1.1f;
     g_yawDeg = 0.0f;
     g_pitchDeg = 0.0f;
@@ -754,7 +774,7 @@ void applyShot(int i) {
     switch (i) {
     case 0: { // visao do jogador, com HUD, lanterna apontada pro monstro
         g_flashlightOn = true; g_monitorOn = true; g_power = 78.0f; g_nightTime = 95.0f;
-        g_monsterT = 0.55f; g_photoHud = true;
+        g_monsterT = 0.55f; g_photoHud = true; g_danger = 0.2f;
         break; }
     case 1: { // corredor visto da porta, lanterna ligada
         setCam(Vector3(0.0f, 1.5f, F + 0.3f), Vector3(0.0f, 1.4f, Scene::CORRIDOR_FAR_Z));
@@ -790,7 +810,7 @@ void applyShot(int i) {
         break; }
     case 8: { // o susto
         g_state = STATE_JUMPSCARE; g_jumpscareProgress = 0.92f;
-        g_flashlightOn = true; g_monsterT = 1.0f;
+        g_flashlightOn = true; g_monsterT = 1.0f; g_danger = 1.0f;
         break; }
     case 9: { // game over
         g_state = STATE_GAME_OVER; g_jumpscareProgress = 1.0f; g_stateTimer = 3.2f;
@@ -802,9 +822,13 @@ void applyShot(int i) {
     case 11: { // vitoria
         g_state = STATE_WON; g_stateTimer = 3.0f; g_nightTime = NIGHT_DURATION; g_photoHud = true;
         break; }
-    default: { // lanterna com bateria quase no fim: fraca, amarelada e estreita
+    case 12: { // lanterna com bateria quase no fim: fraca, amarelada e estreita
         g_flashlightOn = true; g_power = 6.0f; g_nightTime = 240.0f;
-        g_monsterT = 0.45f; g_photoHud = true;
+        g_monsterT = 0.45f; g_photoHud = true; g_danger = 0.3f;
+        break; }
+    default: { // perigo alto: monstro perto, vinheta vermelha, nevoa mais densa
+        g_flashlightOn = true; g_power = 55.0f; g_nightTime = 200.0f;
+        g_monsterT = 0.88f; g_photoHud = true; g_danger = 0.9f;
         break; }
     }
 }
@@ -1332,6 +1356,70 @@ void drawWinScreen() {
     }
 }
 
+// --- Atmosfera ---------------------------------------------------
+// Efeitos de tela cheia que reagem ao perigo (g_danger). Sao desenhados
+// em 2D por cima da cena, antes do HUD (pra nao escurecer os textos).
+
+// VINHETA: escurece as bordas e os cantos da tela, como a visao de
+// tunel do medo. E' uma faixa elipsoidal entre dois aneis: o anel de
+// dentro (45% do raio) e' transparente e o de fora e' escuro; o OpenGL
+// interpola o alpha entre eles. "red" tinge as bordas de vermelho.
+void drawVignette(float alpha, float red) {
+    const int SEG = 48;
+    float cx = g_windowW * 0.5f, cy = g_windowH * 0.5f;
+    float rx = g_windowW * 0.78f, ry = g_windowH * 0.78f; // maior que a tela: cantos ficam bem escuros
+    const float inner = 0.45f;
+    glBegin(GL_QUAD_STRIP);
+        for (int i = 0; i <= SEG; ++i) {
+            float a = 6.2831853f * (float)i / (float)SEG;
+            float c = cosf(a), sn = sinf(a);
+            glColor4f(red, 0.0f, 0.0f, 0.0f);
+            glVertex2f(cx + c * rx * inner, cy + sn * ry * inner);
+            glColor4f(red, 0.0f, 0.0f, alpha);
+            glVertex2f(cx + c * rx, cy + sn * ry);
+        }
+    glEnd();
+}
+
+// GRANULADO DE FILME: um quadrado de ruido (textura 256x256 de pontos
+// aleatorios) cobrindo a tela, SOMADO a' imagem (blending aditivo) com
+// pouca forca. A cada frame o deslocamento da textura e' sorteado, entao
+// o ruido "ferve" como numa filmagem velha.
+void drawGrain(float alpha) {
+    const float W = (float)g_windowW, H = (float)g_windowH;
+    const float texel = 2.0f;                          // cada ponto de ruido tem 2x2 pixels
+    float ox = randRange(0.0f, 1.0f), oy = randRange(0.0f, 1.0f);
+    float sx = W / (256.0f * texel), sy = H / (256.0f * texel);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_grainTex);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);                 // soma, sem escurecer a cena
+    glColor4f(1.0f, 1.0f, 1.0f, alpha);
+    glBegin(GL_QUADS);
+        glTexCoord2f(ox,      oy);      glVertex2f(0.0f, 0.0f);
+        glTexCoord2f(ox + sx, oy);      glVertex2f(W,    0.0f);
+        glTexCoord2f(ox + sx, oy + sy); glVertex2f(W,    H);
+        glTexCoord2f(ox,      oy + sy); glVertex2f(0.0f, H);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+}
+
+// Junta os efeitos. O perigo escurece mais as bordas e as tinge de
+// vermelho, e a vinheta PULSA como um batimento cardiaco ("lub-dub": duas
+// batidas por ciclo) cada vez mais rapido. No modo foto o granulado fica
+// desligado (ruido aleatorio nao comprime e deixaria os PNGs enormes).
+void drawAtmosphere() {
+    hudBegin();
+    float d = g_danger;
+    float ph = g_uiTime * (4.5f + 5.0f * d);          // fase do batimento (rad)
+    float beat = powf(fmaxf(0.0f, sinf(ph)), 8.0f)
+               + 0.6f * powf(fmaxf(0.0f, sinf(ph - 0.9f)), 8.0f);
+    float edge = (VIGNETTE_BASE + 0.45f * d) * (1.0f + 0.35f * d * beat);
+    drawVignette(clamp01(edge), 0.12f * d);
+    if (!g_photoActive) drawGrain(GRAIN_BASE + 0.09f * d);
+    hudEnd();
+}
+
 // Decide o que o HUD mostra conforme o estado do jogo.
 void drawHud() {
     hudBegin();
@@ -1362,6 +1450,46 @@ void drawHud() {
     hudEnd();
 }
 
+// --- Balanco da camera -------------------------------------------
+// Pequenos deslocamentos e giros da camera, so' visuais, somados de senos
+// (periodicos e baratos, sem sorteio: o resultado so' depende do tempo):
+//  - RESPIRACAO: sobe/desce ~1 cm e inclina de leve; fica mais rapida e
+//    mais ampla conforme o perigo cresce;
+//  - TREMOR DE MAO: oscilacao rapida e minuscula que cresce com o
+//    quadrado do perigo (o jogador "treme de medo");
+//  - SUSTO: tremor forte (posicao, giro e inclinacao lateral = "roll")
+//    que cresce durante o salto e some em ~1 s na tela de game over.
+struct CamSway { float dx, dy, yaw, pitch, roll; }; // metros e graus
+
+CamSway computeSway() {
+    CamSway s = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    const float t = g_uiTime, d = g_danger;
+    float rate = 1.6f * (1.0f + 1.2f * d);
+    float amp  = 1.0f + 1.5f * d;
+    s.dy    = 0.010f * amp * sinf(t * rate);
+    s.pitch = 0.35f  * amp * sinf(t * rate + 0.6f);
+    s.yaw   = 0.25f  * amp * sinf(t * 0.9f + 1.3f);
+    s.roll  = 0.30f  * amp * sinf(t * 0.7f);
+
+    float tr = 0.002f + 0.010f * d * d;
+    s.dx    += tr * (sinf(t * 17.0f) + 0.6f * sinf(t * 29.0f + 1.0f));
+    s.dy    += tr * (sinf(t * 23.0f + 2.0f) + 0.6f * sinf(t * 37.0f));
+    s.yaw   += 20.0f * tr * sinf(t * 19.0f + 0.5f);
+    s.pitch += 20.0f * tr * sinf(t * 31.0f);
+
+    float shake = 0.0f;
+    if (g_state == STATE_JUMPSCARE)      shake = g_jumpscareProgress * g_jumpscareProgress;
+    else if (g_state == STATE_GAME_OVER) shake = expf(-4.0f * g_stateTimer);
+    if (shake > 0.0f) {
+        s.dx    += 0.05f * shake * (sinf(t * 53.0f) + 0.7f * sinf(t * 71.0f + 1.0f));
+        s.dy    += 0.05f * shake * (sinf(t * 59.0f + 2.0f) + 0.7f * sinf(t * 83.0f));
+        s.roll  += 2.5f  * shake * sinf(t * 61.0f);
+        s.pitch += 1.5f  * shake * sinf(t * 47.0f + 1.0f);
+        s.yaw   += 1.5f  * shake * sinf(t * 43.0f + 2.0f);
+    }
+    return s;
+}
+
 // ===============================================================
 // 7. DISPLAY
 // [Requisito C] Chamado pelo GLUT sempre que o timer pede um redesenho
@@ -1387,11 +1515,14 @@ void display() {
     glLoadIdentity();
     Vector3 eye = g_eye;
     Vector3 center;
+    CamSway sw = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };   // camera livre (fotos) nao balanca
     if (g_camOverride) {
         eye = g_ovEye;
         center = g_ovCenter;
     } else {
-        Vector3 forward = computeForward();
+        sw = computeSway();
+        eye = Vector3(g_eye.x + sw.dx, g_eye.y + sw.dy, g_eye.z);
+        Vector3 forward = computeForward(sw.yaw, sw.pitch);
         center = Vector3(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
     }
 
@@ -1413,9 +1544,14 @@ void display() {
         center = center + (face - center) * k;
     }
 
+    // O vetor "pra cima" inclinado pelo roll faz a imagem girar de leve.
+    float rollRad = sw.roll * DEG2RAD;
     gluLookAt(eye.x, eye.y, eye.z,
               center.x, center.y, center.z,
-              0.0, 1.0, 0.0);
+              sinf(rollRad), cosf(rollRad), 0.0);
+
+    // A nevoa fecha um pouco quando o perigo sobe (ate' +50% de densidade).
+    glFogf(GL_FOG_DENSITY, FOG_DENSITY * (1.0f + 0.5f * g_danger));
 
     // Direcao (unitaria) pra onde a camera/lanterna apontam
     Vector3 dir = center - eye;
@@ -1476,6 +1612,9 @@ void display() {
     }
 
     if (ambientChanged) glLightModelfv(GL_LIGHT_MODEL_AMBIENT, prevAmbient);
+
+    // Vinheta e granulado: durante o jogo e no susto (menus e telas de fim tem o proprio overlay)
+    if (g_state == STATE_PLAYING || g_state == STATE_JUMPSCARE) drawAtmosphere();
 
     if (!g_photoActive || g_photoHud) drawHud();
 
@@ -1796,15 +1935,54 @@ void timerFunc(int) {
         g_stateTimer += dt; // MENU / PAUSED / GAME_OVER / WON: so' avanca o relogio da animacao da tela
     }
 
+    // --- PERIGO: alvo calculado do estado do jogo; g_danger acompanha o alvo
+    // com suavizacao (sobe rapido, desce devagar) pra os efeitos nao "pularem".
+    float dangerTarget = 0.0f;
+    if (g_state == STATE_PLAYING) {
+        dangerTarget = smooth01(0.30f, 0.95f, g_monsterT)    // monstro se aproximando
+                     + (g_sprinting ? 0.30f : 0.0f)          // sprint
+                     + 0.20f * lowPower();                   // bateria no fim
+    } else if (g_state == STATE_JUMPSCARE || g_state == STATE_GAME_OVER) {
+        dangerTarget = 1.0f;
+    } else if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
+        dangerTarget = 0.1f;
+    }
+    dangerTarget = clamp01(dangerTarget);
+    g_danger += (dangerTarget - g_danger) * clamp01(dt * (dangerTarget > g_danger ? 4.0f : 1.2f));
+
     // --- 5. Redesenha e se reagenda (16 ms ~ 60 quadros por segundo) ---
     glutPostRedisplay();
     glutTimerFunc(16, timerFunc, 0);
+}
+
+// Textura de ruido do granulado: 256x256 pontos cinza aleatorios. O gray
+// e' elevado a 4 (r*r*r*r) pra a maioria ficar escura e so' alguns pontos
+// brilharem: o granulado clareia pouco a cena em media. Filtro NEAREST
+// mantem cada ponto nitido.
+void initGrainTexture() {
+    const int G = 256;
+    std::vector<unsigned char> px((size_t)G * G * 4);
+    for (size_t i = 0; i < (size_t)G * G; ++i) {
+        float r = (float)rand() / (float)RAND_MAX;
+        unsigned char v = (unsigned char)(r * r * r * r * 0.9f * 255.0f);
+        px[i * 4] = v; px[i * 4 + 1] = v; px[i * 4 + 2] = v; px[i * 4 + 3] = 255;
+    }
+    glGenTextures(1, &g_grainTex);
+    glBindTexture(GL_TEXTURE_2D, g_grainTex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, G, G, 0, GL_RGBA, GL_UNSIGNED_BYTE, &px[0]);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void initGL() {
     glEnable(GL_DEPTH_TEST); // z-buffer: objetos mais proximos escondem os mais distantes
     initLighting();
     initTextures();          // gera as texturas procedurais (precisa do contexto OpenGL)
+    initGrainTexture();      // ruido do granulado de filme
 
     // NEVOA: o OpenGL mistura a cor de cada pixel com a cor da nevoa, em
     // quantidade crescente com a distancia ate' a camera. GL_EXP2 = queda

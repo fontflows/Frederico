@@ -144,6 +144,10 @@ static float lenOf(const Vector3& a) { return sqrtf(a.x * a.x + a.y * a.y + a.z 
 // (definida mais abaixo, na parte do corredor; o monitor tambem usa)
 static float lampLevel(float t, float phase);
 
+// Quao perto o monstro esta' (0 a 1): as lampadas do corredor falham mais
+// (flashes extras de apagao) quando ele se aproxima. Atualizado em drawRoomProps.
+static float g_lampDanger = 0.0f;
+
 // Caixa (paralelepipedo) centrada em (cx,cy,cz) com dimensoes
 // (sx,sy,sz): um cubo unitario do GLUT esticado por glScalef e movido
 // por glTranslatef. Com esse helper montamos quase todos os objetos.
@@ -963,9 +967,15 @@ static void drawTrim() {
 // apagao total. "phase" defasa as lampadas pra nao piscarem juntas.
 static float lampLevel(float t, float phase) {
     float c = fmodf(t + phase, 7.3f);
-    if (c > 6.4f) return 0.0f;                                      // apagao
-    if (c > 5.6f) return (fmodf(t * 17.0f, 1.0f) < 0.45f) ? 1.0f : 0.1f; // pisca rapido
-    return 0.30f + 0.05f * sinf(t * 2.0f);                          // fraco e estavel
+    float lv;
+    if (c > 6.4f)      lv = 0.0f;                                         // apagao
+    else if (c > 5.6f) lv = (fmodf(t * 17.0f, 1.0f) < 0.45f) ? 1.0f : 0.1f; // pisca rapido
+    else               lv = 0.30f + 0.05f * sinf(t * 2.0f);                // fraco e estavel
+    // Perigo: 20 vezes por segundo sorteia (hash) se a lampada cai pra 10%.
+    // Com o monstro colado na porta, ~35% dos instantes viram falha.
+    if (g_lampDanger > 0.0f &&
+        hash2((int)(t * 20.0f), (int)(phase * 10.0f) + 5) < 0.35f * g_lampDanger) lv *= 0.1f;
+    return lv;
 }
 
 // Liga uma luz pontual esverdeada no teto do corredor, com a forca
@@ -1152,6 +1162,8 @@ void drawRoomProps(float time, bool monitorOn, const Vector3& monsterPos) {
     float lateral = monsterPos.x / CORRIDOR_HALF_W;
     if (lateral < -1.0f) lateral = -1.0f;
     if (lateral >  1.0f) lateral =  1.0f;
+
+    g_lampDanger = clampf01((f - 0.5f) * 2.0f);   // 0 ate' a metade do corredor, 1 colado na porta
 
     // brilho do monitor: um pouco a' frente da tela, do lado do jogador
     setupMonitorLight(-0.50f, 1.05f, frontDeskZ + 0.35f, time, monitorOn);
