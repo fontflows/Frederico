@@ -5,7 +5,8 @@ SRCS := $(SRC_DIR)/main.cpp \
         $(SRC_DIR)/bezier.cpp \
         $(SRC_DIR)/lighting.cpp \
         $(SRC_DIR)/scene_builder.cpp \
-        $(SRC_DIR)/enemy.cpp
+        $(SRC_DIR)/enemy.cpp \
+        $(SRC_DIR)/textures.cpp \
 
 OBJS := $(SRCS:.cpp=.o)
 

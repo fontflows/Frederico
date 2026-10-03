@@ -8,7 +8,8 @@
 //   C - Animacoes (controle de tempo)                -> timerFunc() abaixo
 //   D - Controle de mouse e teclado                  -> passiveMotion(), keyboard(), mouse()
 //   E - Camera e perspectiva                         -> display() (gluPerspective/gluLookAt)
-//   F - Iluminacao                                   -> lighting.*, feixe da lanterna (spot) aqui
+//   F - Iluminacao                                   -> lighting.*, lanterna (spot), nevoa, bateria baixa aqui
+//   H - Texturas (procedurais)                       -> textures.*, aplicadas em scene_builder.cpp
 //   G - Curvas parametricas (Bezier)                 -> bezier.*, usado em currentMonsterPosition()
 //
 // ------------------------------------------------------------
@@ -82,6 +83,7 @@
 #include "lighting.h"
 #include "scene_builder.h"
 #include "enemy.h"
+#include "textures.h"
 
 // Tudo dentro do namespace anonimo so' existe neste arquivo (nao vaza
 // pra outros .cpp), o equivalente moderno de declarar tudo "static".
@@ -126,6 +128,17 @@ const float BEAM_HALF_ANGLE_DEG = 13.0f;
 const float BEAM_RANGE          = 26.0f;  // alcance maximo (m)
 const float MONSTER_HIT_RADIUS  = 0.9f;   // raio aproximado do corpo do monstro (m)
 const float MONSTER_CENTER_Y    = 1.5f;   // altura do centro do corpo do monstro (m)
+
+// Lanterna com bateria baixa: abaixo de FLASH_LOW_FRAC da bateria (25%) ela
+// vai piorando aos poucos: escurece e fica amarelada, o feixe estreita e
+// encurta, e ela falha (pisca e apaga por instantes). Quanto mais perto
+// de 0%, pior. Quando falha, nao afasta o monstro.
+const float FLASH_LOW_FRAC = 0.25f;
+
+// Nevoa: densidade da nevoa exponencial (GL_EXP2). A visibilidade cai com
+// a distancia como exp(-(densidade*distancia)^2): com 0.045, a 10 m
+// resta ~80%, a 20 m ~45% e no fundo do corredor (~22 m) ~37%.
+const float FOG_DENSITY = 0.045f;
 
 // Dificuldade progressiva: o monstro fica mais rapido conforme a noite
 // avanca (de 1.0x ate' SPEED_RAMP_END) e a velocidade oscila entre
@@ -178,6 +191,9 @@ bool  g_monitorOn    = false; // monitor da mesa (mostra onde o monstro esta')
 float g_power        = POWER_MAX;
 bool  g_beamHit      = false; // o feixe da lanterna esta' acertando o monstro agora?
 bool  g_debug        = false; // painel de depuracao (F3)
+float g_flashLevel   = 1.0f;  // 0..1: quanto a lanterna esta' funcionando (cai com bateria baixa)
+GLfloat g_flashBase[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // cor original da luz da lanterna (lida do lighting.cpp)
+bool  g_flashBaseCached = false;
 
 // Porta: g_doorClosing e' o que o jogador PEDIU; g_doorOffsetY e' onde a
 // porta REALMENTE esta' (ela anima suavemente ate' o alvo).
@@ -324,6 +340,34 @@ Vector3 currentMonsterPosition() {
     return doorwayPos + (lungeTarget - doorwayPos) * g_jumpscareProgress;
 }
 
+// --- Lanterna com bateria baixa --------------------------------
+// lowPower(): 0 = bateria normal (>= 25%), 1 = vazia. Tudo abaixo e'
+// funcao disso, entao a lanterna piora de forma gradual.
+float lowPower() { return clamp01(1.0f - g_power / (POWER_MAX * FLASH_LOW_FRAC)); }
+
+// Abertura e alcance EFETIVOS do feixe: encolhem com a bateria baixa. A
+// mira (flashlightHits), a luz (spot) e o desenho do feixe usam estes valores.
+float beamHalfAngle() { return lerpf(BEAM_HALF_ANGLE_DEG, BEAM_HALF_ANGLE_DEG * 0.6f, lowPower()); }
+float beamRange()     { return lerpf(BEAM_RANGE, BEAM_RANGE * 0.5f, lowPower()); }
+
+// g_flashLevel: intensidade da lanterna agora. Depende so' do relogio e da
+// bateria (sem aleatoriedade guardada), entao display e logica concordam.
+//  - escurece ate' 55% conforme a bateria cai;
+//  - "falhas": a 24 vezes por segundo sorteia (hash) se a luz cai pra 15%;
+//    a chance sobe com o quadrado de lowPower();
+//  - abaixo de ~50% de lowPower aparecem APAGOES de ate' meio segundo.
+void updateFlashLevel() {
+    float low = lowPower();
+    float level = 1.0f - 0.45f * low;
+    if (low > 0.0f) {
+        int tick = (int)(g_uiTime * 24.0f);
+        float chance = 0.04f + 0.55f * low * low;
+        if (hash01(tick, 77) < chance) level *= 0.15f;
+        if (low > 0.5f && fmodf(g_uiTime, 2.1f) < (low - 0.5f)) level = 0.0f;
+    }
+    g_flashLevel = level;
+}
+
 // A MIRA DA LANTERNA. O feixe e' um cone com vertice no olho do
 // jogador, eixo na direcao "dir" (vetor unitario) e meia abertura
 // BEAM_HALF_ANGLE_DEG. Um alvo (centro + raio) esta' iluminado se o
@@ -337,12 +381,12 @@ bool flashlightHits(const Vector3& eye, const Vector3& dir,
                     const Vector3& target, float radius) {
     Vector3 v = target - eye;
     float dist = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-    if (dist > BEAM_RANGE) return false;
+    if (dist > beamRange()) return false;
     if (dist < 0.001f) return true;
     float cosA  = clampf((v.x * dir.x + v.y * dir.y + v.z * dir.z) / dist, -1.0f, 1.0f);
     float angle = acosf(cosA) / DEG2RAD;                       // angulo ate' o centro do alvo
     float slack = asinf(clampf(radius / dist, 0.0f, 1.0f)) / DEG2RAD; // angulo do raio do alvo
-    return angle <= BEAM_HALF_ANGLE_DEG + slack;
+    return angle <= beamHalfAngle() + slack;
 }
 
 // Transforma a luz da lanterna (GL_LIGHT0) num SPOT: um cone de luz
@@ -353,8 +397,22 @@ bool flashlightHits(const Vector3& eye, const Vector3& dir,
 void setupFlashlightSpot(const Vector3& dir) {
     const GLfloat d[3] = { dir.x, dir.y, dir.z };
     glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, d);
-    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, BEAM_HALF_ANGLE_DEG + 3.0f);
+    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, beamHalfAngle() + 3.0f);
     glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 12.0f);
+
+    // Intensidade e cor da luz: parte da cor ORIGINAL definida no
+    // lighting.cpp (lida uma vez), multiplicada pelo nivel da lanterna e
+    // puxada pro amarelo/laranja conforme a bateria acaba.
+    if (!g_flashBaseCached) {
+        glGetLightfv(GL_LIGHT0, GL_DIFFUSE, g_flashBase);
+        g_flashBaseCached = true;
+    }
+    float low = lowPower();
+    const GLfloat diff[4] = { g_flashBase[0] * g_flashLevel,
+                              g_flashBase[1] * g_flashLevel * (1.0f - 0.20f * low),
+                              g_flashBase[2] * g_flashLevel * (1.0f - 0.45f * low),
+                              1.0f };
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, diff);
 }
 
 // Desenha o FEIXE VISIVEL da lanterna: luz volumetrica saindo da "mao"
@@ -377,20 +435,24 @@ void drawFlashlightBeam(const Vector3& eye, const Vector3& dir, bool hit) {
 
     // intensidade: pisca quando a bateria esta' acabando; mais forte
     // quando acerta o monstro
-    float k = hit ? 1.6f : 1.0f;
-    if (g_state == STATE_PLAYING && g_power < POWER_MAX * 0.2f) {
-        k *= 0.55f + 0.45f * fabsf(sinf(g_uiTime * 23.0f));
-    }
-    // cor: branco quente; branco-azulado quando acerta o monstro
-    float cr = hit ? 0.85f : 1.00f, cg = hit ? 0.92f : 0.95f, cb = hit ? 1.00f : 0.80f;
+    // Com bateria baixa o feixe acompanha a lanterna: some e volta
+    // (g_flashLevel), fica amarelado, mais curto e mais estreito.
+    float low = lowPower();
+    float k = (hit ? 1.6f : 1.0f) * g_flashLevel;
+    // cor: branco quente; branco-azulado quando acerta o monstro;
+    // amarelo-alaranjado com bateria baixa
+    float cr = hit ? 0.85f : 1.00f;
+    float cg = (hit ? 0.92f : 0.95f) - 0.20f * low;
+    float cb = (hit ? 1.00f : 0.80f) - 0.40f * low;
 
-    const float L = 16.0f;                                    // comprimento do feixe desenhado
-    const float R = L * tanf(BEAM_HALF_ANGLE_DEG * DEG2RAD);  // raio do feixe na ponta
+    const float L = 16.0f * (beamRange() / BEAM_RANGE);       // comprimento do feixe desenhado
+    const float R = L * tanf(beamHalfAngle() * DEG2RAD);      // raio do feixe na ponta
     const float ox = 0.13f, oy = -0.10f, oz = -0.15f;         // onde a "mao" segura (local)
 
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                  GL_CURRENT_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
+    glDisable(GL_FOG);        // o feixe tem o proprio fade; a nevoa so' o apagaria
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDepthMask(GL_FALSE);
@@ -659,11 +721,11 @@ bool captureFrame(const char* path) {
 // proxima. Cada foto usa um "relogio" fixo (g_photoTime) pra que as
 // lampadas e o ventilador saiam sempre na mesma pose, e uma luz ambiente
 // extra opcional pra enxergar o cenario (no jogo normal e' quase breu).
-const int NUM_SHOTS = 12;
+const int NUM_SHOTS = 13;
 const char* SHOT_NAMES[NUM_SHOTS] = {
     "01_pov_jogador", "02_corredor", "03_corredor_piscando", "04_monstro_corpo",
     "05_monstro_rosto", "06_sala_geral", "07_mesa_monitor", "08_porta",
-    "09_susto", "10_game_over", "11_menu", "12_vitoria"
+    "09_susto", "10_game_over", "11_menu", "12_vitoria", "13_lanterna_fraca"
 };
 
 void setCam(const Vector3& e, const Vector3& c) {
@@ -737,8 +799,12 @@ void applyShot(int i) {
     case 10: { // menu inicial
         g_state = STATE_MENU; g_stateTimer = 1.0f; g_photoHud = true;
         break; }
-    default: { // vitoria
+    case 11: { // vitoria
         g_state = STATE_WON; g_stateTimer = 3.0f; g_nightTime = NIGHT_DURATION; g_photoHud = true;
+        break; }
+    default: { // lanterna com bateria quase no fim: fraca, amarelada e estreita
+        g_flashlightOn = true; g_power = 6.0f; g_nightTime = 240.0f;
+        g_monsterT = 0.45f; g_photoHud = true;
         break; }
     }
 }
@@ -929,6 +995,8 @@ void hudBegin() {
                  GL_CURRENT_BIT | GL_LIGHTING_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_LIGHTING);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_FOG);
+    glDisable(GL_TEXTURE_2D);
 
     // Transparencia: cor final = cor_nova * alpha + cor_que_ja_estava * (1 - alpha).
     // E' o que permite paineis semi-transparentes e fades.
@@ -1359,6 +1427,7 @@ void display() {
     // ATUAL, entao precisa ser definida depois do gluLookAt pra "grudar"
     // na camera. Em seguida a transformamos num cone (spot) apontado pra dir.
     updateFlashlight(g_flashlightOn);
+    updateFlashLevel();            // lanterna fraca com bateria baixa
     setupFlashlightSpot(dir);
 
     // Modo foto: luz ambiente extra pra enxergar o cenario
@@ -1397,6 +1466,9 @@ void display() {
     // Interruptor da porta (LED: verde = aberta, vermelho = fechada).
     // Vem depois das paredes porque o brilho do LED usa transparencia.
     drawDoorSwitch(g_doorClosing, g_power > 0.0f);
+
+    // Manchas de sangue (decalques transparentes): depois de piso e paredes.
+    drawDecals();
 
     // Feixe visivel da lanterna: por ultimo na cena 3D (e' translucido).
     if (g_flashlightOn && (g_state == STATE_PLAYING || g_state == STATE_PAUSED || g_photoActive)) {
@@ -1661,7 +1733,8 @@ void timerFunc(int) {
         // display usa pro cone de luz.
         Vector3 mp = currentMonsterPosition();
         Vector3 monsterCenter(mp.x, mp.y + MONSTER_CENTER_Y, mp.z);
-        g_beamHit = g_flashlightOn &&
+        updateFlashLevel();
+        g_beamHit = g_flashlightOn && g_flashLevel > 0.2f &&   // lanterna falhando nao conta
                     flashlightHits(g_eye, computeForward(), monsterCenter, MONSTER_HIT_RADIUS);
 
         // Movimento do monstro. "rate" e' a variacao do parametro t da
@@ -1677,7 +1750,8 @@ void timerFunc(int) {
         } else {
             float advance = g_sprinting ? SPRINT_RATE
                                         : ADVANCE_RATE_BASE * currentSpeedMultiplier();
-            if (g_beamHit) rate = g_sprinting ? (advance - RETREAT_RATE) : -RETREAT_RATE;
+            float retreat = RETREAT_RATE * g_flashLevel;   // luz fraca afasta menos
+            if (g_beamHit) rate = g_sprinting ? (advance - retreat) : -retreat;
             else           rate = advance;
         }
         g_monsterT += rate * dt;
@@ -1730,6 +1804,19 @@ void timerFunc(int) {
 void initGL() {
     glEnable(GL_DEPTH_TEST); // z-buffer: objetos mais proximos escondem os mais distantes
     initLighting();
+    initTextures();          // gera as texturas procedurais (precisa do contexto OpenGL)
+
+    // NEVOA: o OpenGL mistura a cor de cada pixel com a cor da nevoa, em
+    // quantidade crescente com a distancia ate' a camera. GL_EXP2 = queda
+    // exponencial ao quadrado (suave de perto, fecha rapido de longe). A
+    // cor e' um cinza-azulado escuro, so' um pouco mais claro que o fundo:
+    // o fim do corredor "some" numa bruma em vez de num corte seco.
+    glEnable(GL_FOG);
+    glFogi(GL_FOG_MODE, GL_EXP2);
+    glFogf(GL_FOG_DENSITY, FOG_DENSITY);
+    const GLfloat fogColor[4] = { 0.03f, 0.035f, 0.04f, 1.0f };
+    glFogfv(GL_FOG_COLOR, fogColor);
+    glHint(GL_FOG_HINT, GL_NICEST);
 }
 
 } // namespace

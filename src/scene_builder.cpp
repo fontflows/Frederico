@@ -1,6 +1,7 @@
 #include "scene_builder.h"
 #include "lighting.h"
 #include "bezier.h" // Vector3
+#include "textures.h"
 
 #ifdef __APPLE__
     #include <GLUT/glut.h>
@@ -34,15 +35,14 @@ static const float WAINSCOT_H = 1.1f;
 // da main.cpp (ROOM_BACK_Z - 1.0). Usada pra colocar a mesa na frente dele.
 static const float PLAYER_EYE_Z = ROOM_BACK_Z - 1.0f;
 
-// Paleta (R,G,B)
-static const float C_FLOOR_A[3]   = { 0.34f, 0.34f, 0.30f }; // ladrilho claro encardido
-static const float C_FLOOR_B[3]   = { 0.07f, 0.07f, 0.08f }; // ladrilho preto
-static const float C_ROOM_LOW[3]  = { 0.14f, 0.22f, 0.20f }; // azulejo verde-azulado
-static const float C_ROOM_HIGH[3] = { 0.34f, 0.33f, 0.28f }; // tinta creme suja
-static const float C_CEIL[3]      = { 0.20f, 0.20f, 0.19f };
-static const float C_CONCRETE[3]  = { 0.22f, 0.22f, 0.21f }; // piso do corredor
-static const float C_COR_LOW[3]   = { 0.11f, 0.20f, 0.18f };
-static const float C_COR_HIGH[3]  = { 0.20f, 0.20f, 0.19f };
+// Tintas (R,G,B): MULTIPLICAM a cor da textura. {1,1,1} deixa a textura
+// como ela e'; valores menores escurecem / mudam o tom.
+static const float C_WHITE[3]     = { 1.00f, 1.00f, 1.00f };
+static const float C_ROOM_LOW[3]  = { 1.00f, 1.00f, 1.00f }; // azulejo da sala
+static const float C_ROOM_HIGH[3] = { 1.00f, 1.00f, 1.00f }; // reboco da sala
+static const float C_CEIL[3]      = { 0.70f, 0.70f, 0.70f }; // forro do corredor, mais escuro
+static const float C_COR_LOW[3]   = { 0.75f, 0.95f, 0.85f }; // azulejo do corredor, mais verde
+static const float C_COR_HIGH[3]  = { 0.55f, 0.58f, 0.60f }; // reboco do corredor, mais frio
 
 // ===============================================================
 // HELPERS DE DESENHO
@@ -75,10 +75,42 @@ static void setPaint(float r, float g, float b) {
 
 // So' troca a cor (sem mexer em especular/emissao). Pode ser chamada
 // dentro de glBegin/glEnd, entao serve pra pintar ladrilho por ladrilho.
-static void tint(float r, float g, float b) {
+static void tint3(float r, float g, float b) {
     const GLfloat c[] = { r, g, b, 1.0f };
     glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, c);
     glColor3f(r, g, b);
+}
+
+// Placa retangular texturizada no plano Z (virada pra +Z), centro (cx,cy,z),
+// largura w, altura h. "texSize" = metros por repeticao da textura.
+// Usada pra cobrir a face da porta de aco e do armario com metal.
+static void texPlateZ(float cx, float cy, float z, float w, float h,
+                      TextureId tex, float texSize, float r, float g, float b) {
+    setPaint(r, g, b);
+    useTexture(tex);
+    glBegin(GL_QUADS);
+        glNormal3f(0.0f, 0.0f, 1.0f);
+        glTexCoord2f(0.0f, 0.0f);                       glVertex3f(cx - w * 0.5f, cy - h * 0.5f, z);
+        glTexCoord2f(w / texSize, 0.0f);                glVertex3f(cx + w * 0.5f, cy - h * 0.5f, z);
+        glTexCoord2f(w / texSize, h / texSize);         glVertex3f(cx + w * 0.5f, cy + h * 0.5f, z);
+        glTexCoord2f(0.0f, h / texSize);                glVertex3f(cx - w * 0.5f, cy + h * 0.5f, z);
+    glEnd();
+    noTexture();
+}
+
+// Idem, mas horizontal (virada pra cima), a' altura y. Cobre o tampo das mesas.
+static void texPlateY(float cx, float y, float cz, float w, float d,
+                      TextureId tex, float texSize, float r, float g, float b) {
+    setPaint(r, g, b);
+    useTexture(tex);
+    glBegin(GL_QUADS);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glTexCoord2f(0.0f, 0.0f);                       glVertex3f(cx - w * 0.5f, y, cz + d * 0.5f);
+        glTexCoord2f(w / texSize, 0.0f);                glVertex3f(cx + w * 0.5f, y, cz + d * 0.5f);
+        glTexCoord2f(w / texSize, d / texSize);         glVertex3f(cx + w * 0.5f, y, cz - d * 0.5f);
+        glTexCoord2f(0.0f, d / texSize);                glVertex3f(cx - w * 0.5f, y, cz - d * 0.5f);
+    glEnd();
+    noTexture();
 }
 
 // Reflexo (brilho especular) do material atual: serve pro metal.
@@ -169,41 +201,56 @@ static void cylinderZ(float x, float y, float z0, float len, float radius) {
     glPopMatrix();
 }
 
-// Superficie plana (parede, piso, teto) SUBDIVIDIDA em varias celulas.
+// Superficie plana (parede, piso, teto) SUBDIVIDIDA em varias celulas e
+// TEXTURIZADA.
 //   p = canto de origem; u e v = vetores das duas arestas (comprimento total)
 //   n = normal; cell = tamanho aproximado de cada celula
-//   c1 / c2 = cores; se c2 != 0 as celulas alternam (xadrez)
-//   variation = quanto o brilho de cada celula varia ao acaso (sujeira)
+//   tex / texSize = textura e quantos metros ela cobre por repeticao
+//   tint = cor que multiplica a textura; variation = quanto o brilho de
+//   cada celula varia ao acaso (quebra a repeticao da textura)
 // POR QUE subdividir? O OpenGL classico calcula a luz so' nos VERTICES e
 // interpola o resultado. Um quad gigante tem so' 4 vertices, entao a
 // lanterna quase nao apareceria nele. Com varias celulas, a luz "cai"
-// de forma localizada (mancha de luz) e o piso/parede ganha textura.
+// de forma localizada (mancha de luz).
+// COORDENADAS DE TEXTURA: cada vertice recebe (s,t) = distancia em metros
+// ao longo de u e de v, dividida por texSize. Com GL_REPEAT, a textura se
+// repete a cada texSize metros, mantendo o mesmo tamanho em qualquer parede.
 static void gridWall(const Vector3& p, const Vector3& u, const Vector3& v, const Vector3& n,
-                     float cell, const float* c1, const float* c2, float variation, int seed) {
-    int nu = (int)(lenOf(u) / cell + 0.5f); if (nu < 1) nu = 1;
-    int nv = (int)(lenOf(v) / cell + 0.5f); if (nv < 1) nv = 1;
-    setPaint(c1[0], c1[1], c1[2]);
+                     float cell, TextureId tex, float texSize, const float* tint,
+                     float variation, int seed) {
+    float lu = lenOf(u), lv = lenOf(v);
+    int nu = (int)(lu / cell + 0.5f); if (nu < 1) nu = 1;
+    int nv = (int)(lv / cell + 0.5f); if (nv < 1) nv = 1;
+    setPaint(tint[0], tint[1], tint[2]);
+    useTexture(tex);
     glBegin(GL_QUADS);
     for (int j = 0; j < nv; ++j) {
         for (int i = 0; i < nu; ++i) {
-            const float* c = (c2 && ((i + j) & 1)) ? c2 : c1;
             float f = 1.0f - variation * hash2(i + seed * 131, j + seed * 71);
-            tint(c[0] * f, c[1] * f, c[2] * f);
+            tint3(tint[0] * f, tint[1] * f, tint[2] * f);
             float u0 = (float)i / nu, u1 = (float)(i + 1) / nu;
             float v0 = (float)j / nv, v1 = (float)(j + 1) / nv;
-            quad(p + u * u0 + v * v0, p + u * u1 + v * v0,
-                 p + u * u1 + v * v1, p + u * u0 + v * v1, n);
+            float s0 = lu * u0 / texSize, s1 = lu * u1 / texSize;
+            float t0 = lv * v0 / texSize, t1 = lv * v1 / texSize;
+            Vector3 a = p + u * u0 + v * v0, b = p + u * u1 + v * v0;
+            Vector3 c = p + u * u1 + v * v1, d = p + u * u0 + v * v1;
+            glNormal3f(n.x, n.y, n.z);
+            glTexCoord2f(s0, t0); glVertex3f(a.x, a.y, a.z);
+            glTexCoord2f(s1, t0); glVertex3f(b.x, b.y, b.z);
+            glTexCoord2f(s1, t1); glVertex3f(c.x, c.y, c.z);
+            glTexCoord2f(s0, t1); glVertex3f(d.x, d.y, d.z);
         }
     }
     glEnd();
+    noTexture();
 }
 
-// Parede em duas faixas: azulejo embaixo (ate' WAINSCOT_H) e tinta em cima.
+// Parede em duas faixas: azulejo embaixo (ate' WAINSCOT_H) e reboco em cima.
 static void wallBands(const Vector3& p0, const Vector3& u, const Vector3& n, float h,
                       const float* low, const float* high, int seed) {
-    gridWall(p0, u, Vector3(0.0f, WAINSCOT_H, 0.0f), n, 0.5f, low, 0, 0.35f, seed);
+    gridWall(p0, u, Vector3(0.0f, WAINSCOT_H, 0.0f), n, 0.5f, TEX_WALL_TILE, 0.6f, low, 0.18f, seed);
     gridWall(p0 + Vector3(0.0f, WAINSCOT_H, 0.0f), u, Vector3(0.0f, h - WAINSCOT_H, 0.0f),
-             n, 1.0f, high, 0, 0.25f, seed + 1);
+             n, 1.0f, TEX_PLASTER, 2.0f, high, 0.18f, seed + 1);
 }
 
 // ===============================================================
@@ -217,12 +264,12 @@ void drawSecurityRoom() {
     // Piso de ladrilhos xadrez (claro/escuro), cada um com sujeira propria.
     gridWall(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
              Vector3(0.0f, 0.0f, depth), Vector3(0.0f, 1.0f, 0.0f),
-             0.5f, C_FLOOR_A, C_FLOOR_B, 0.45f, 11);
+             0.5f, TEX_FLOOR_TILE, 1.0f, C_WHITE, 0.15f, 11);
 
     // Teto
     gridWall(Vector3(-ROOM_HALF_WIDTH, ROOM_HEIGHT, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
              Vector3(0.0f, 0.0f, depth), Vector3(0.0f, -1.0f, 0.0f),
-             1.0f, C_CEIL, 0, 0.20f, 12);
+             1.0f, TEX_CEILING, 1.2f, C_WHITE, 0.15f, 12);
 
     // Parede de tras (normal -Z)
     wallBands(Vector3(-ROOM_HALF_WIDTH, 0.0f, ROOM_BACK_Z), Vector3(W2, 0.0f, 0.0f),
@@ -244,7 +291,7 @@ void drawSecurityRoom() {
     gridWall(Vector3(-DOORWAY_HALF_W, DOORWAY_HEIGHT, ROOM_FRONT_Z),
              Vector3(2.0f * DOORWAY_HALF_W, 0.0f, 0.0f),
              Vector3(0.0f, ROOM_HEIGHT - DOORWAY_HEIGHT, 0.0f),
-             Vector3(0.0f, 0.0f, 1.0f), 1.0f, C_ROOM_HIGH, 0, 0.25f, 71);
+             Vector3(0.0f, 0.0f, 1.0f), 1.0f, TEX_PLASTER, 2.0f, C_ROOM_HIGH, 0.20f, 71);
 }
 
 void drawCorridor() {
@@ -254,7 +301,7 @@ void drawCorridor() {
     // Piso de concreto sujo, em lajes de 1 m
     gridWall(Vector3(-CORRIDOR_HALF_W, 0.0f, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
              Vector3(0.0f, 0.0f, -L), Vector3(0.0f, 1.0f, 0.0f),
-             1.0f, C_CONCRETE, 0, 0.55f, 81);
+             1.0f, TEX_CONCRETE, 2.0f, C_WHITE, 0.25f, 81);
 
     // Faixas amarelas de seguranca, tracejadas, nas duas bordas do piso
     setPaint(0.50f, 0.42f, 0.07f);
@@ -263,7 +310,7 @@ void drawCorridor() {
         float x = side * (CORRIDOR_HALF_W - 0.22f);
         for (float d = 0.0f; d + 1.0f <= L; d += 2.0f) {
             float f = 0.6f + 0.4f * hash2((int)d, side + 5);   // faixas gastas
-            tint(0.50f * f, 0.42f * f, 0.07f * f);
+            tint3(0.50f * f, 0.42f * f, 0.07f * f);
             float z0 = ROOM_FRONT_Z - d, z1 = ROOM_FRONT_Z - d - 1.0f;
             quad(Vector3(x - 0.04f, 0.003f, z0), Vector3(x + 0.04f, 0.003f, z0),
                  Vector3(x + 0.04f, 0.003f, z1), Vector3(x - 0.04f, 0.003f, z1),
@@ -275,7 +322,7 @@ void drawCorridor() {
     // Teto
     gridWall(Vector3(-CORRIDOR_HALF_W, CORRIDOR_HEIGHT, ROOM_FRONT_Z), Vector3(W2, 0.0f, 0.0f),
              Vector3(0.0f, 0.0f, -L), Vector3(0.0f, -1.0f, 0.0f),
-             1.0f, C_CEIL, 0, 0.30f, 82);
+             1.0f, TEX_CEILING, 1.2f, C_CEIL, 0.20f, 82);
 
     // Paredes laterais e parede de fundo, com azulejo embaixo
     wallBands(Vector3(-CORRIDOR_HALF_W, 0.0f, ROOM_FRONT_Z), Vector3(0.0f, 0.0f, -L),
@@ -298,6 +345,10 @@ static void rivet(float x, float y, float z) {
 
 static void drawDoorDetails(float W, float H) {
     const float z0 = 0.04f;
+
+    // chapa de aco texturizada (escovado + ferrugem + arranhoes) cobrindo
+    // a face inteira; os detalhes abaixo ficam por cima dela
+    texPlateZ(0.0f, 0.0f, z0 + 0.0015f, W - 0.04f, H - 0.04f, TEX_METAL, 1.0f, 1.0f, 1.0f, 1.0f);
 
     // moldura interna: 4 barras escuras
     setPaint(0.10f, 0.11f, 0.12f);
@@ -776,6 +827,7 @@ static void drawPoster() {
 static void drawDesk(float w, float d) {
     setPaint(0.30f, 0.20f, 0.12f);                       // madeira escura
     box(0.0f, 0.725f, 0.0f, w, 0.05f, d);                // tampo
+    texPlateY(0.0f, 0.7505f, 0.0f, w, d, TEX_WOOD, 0.8f, 1.0f, 1.0f, 1.0f);  // madeira com veios por cima
     for (int i = -1; i <= 1; i += 2) {                   // 4 pes, um em cada canto
         for (int j = -1; j <= 1; j += 2) {
             box((w * 0.5f - 0.05f) * i, 0.35f, (d * 0.5f - 0.05f) * j, 0.06f, 0.70f, 0.06f);
@@ -842,6 +894,8 @@ static void drawCabinet(float x, float z) {
 
     setPaint(0.22f, 0.28f, 0.25f);                        // verde acinzentado
     box(0.0f, 0.95f, 0.0f, 0.90f, 1.90f, 0.60f);          // corpo
+
+    texPlateZ(0.0f, 0.95f, 0.3003f, 0.90f, 1.90f, TEX_METAL, 1.0f, 0.55f, 0.85f, 0.65f); // metal esverdeado
 
     setPaint(0.05f, 0.06f, 0.06f);
     box(0.0f, 0.95f, 0.301f, 0.008f, 1.80f, 0.004f);      // fresta entre as portas
@@ -1111,4 +1165,65 @@ void drawRoomProps(float time, bool monitorOn, const Vector3& monsterPos) {
     drawCorridorProps(time);
 
     glDisable(GL_NORMALIZE);
+}
+
+// ===============================================================
+// DECALQUES DE SANGUE
+// Um "decalque" e' um quad com uma textura que tem transparencia (canal
+// alfa), colado um milimetro acima de uma superficie. Com blending
+// ligado, so' a mancha aparece e o piso/parede continua visivel em volta.
+// Escrita de profundidade desligada: o decalque nao esconde nada.
+// Deve ser chamado DEPOIS das paredes e do piso (senao seriam cobertos).
+// ===============================================================
+
+// Decalque no chao, centro (x,z), meio-lado "half", girado "angleDeg".
+static void floorDecal(float x, float z, float half, float angleDeg) {
+    float a = angleDeg * 3.14159265f / 180.0f;
+    float ux = cosf(a) * half, uz = sinf(a) * half;       // eixos do decalque girados
+    float vx = -sinf(a) * half, vz = cosf(a) * half;
+    const float y = 0.006f;
+    setPaint(1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(x - ux - vx, y, z - uz - vz);
+        glTexCoord2f(1.0f, 0.0f); glVertex3f(x + ux - vx, y, z + uz - vz);
+        glTexCoord2f(1.0f, 1.0f); glVertex3f(x + ux + vx, y, z + uz + vz);
+        glTexCoord2f(0.0f, 1.0f); glVertex3f(x - ux + vx, y, z - uz + vz);
+    glEnd();
+}
+
+// Decalque numa parede perpendicular a X, em (x,y,z). nx = +1 se a parede
+// olha pra +X (parede esquerda) ou -1 se olha pra -X (parede direita).
+static void wallDecalX(float x, float y, float z, float half, float nx) {
+    setPaint(1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+        glNormal3f(nx, 0.0f, 0.0f);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(x, y - half, z - half);
+        glTexCoord2f(1.0f, 0.0f); glVertex3f(x, y - half, z + half);
+        glTexCoord2f(1.0f, 1.0f); glVertex3f(x, y + half, z + half);
+        glTexCoord2f(0.0f, 1.0f); glVertex3f(x, y + half, z - half);
+    glEnd();
+}
+
+void drawDecals() {
+    const float F  = ROOM_FRONT_Z;
+    const float CW = CORRIDOR_HALF_W;
+
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_CURRENT_BIT);
+    useTexture(TEX_BLOOD);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    // pocas no chao do corredor, perto da porta e mais ao fundo
+    floorDecal( 0.20f, F - 1.8f, 1.30f,  20.0f);
+    floorDecal(-0.50f, F - 6.8f, 0.90f, 110.0f);
+    floorDecal( 0.40f, F - 12.5f, 1.10f, 200.0f);
+    // respingos nas paredes do corredor
+    wallDecalX(-CW + 0.004f, 1.55f, F - 4.4f, 0.75f,  1.0f);
+    wallDecalX( CW - 0.004f, 1.20f, F - 9.5f, 0.65f, -1.0f);
+    // sangue na sala, junto da abertura
+    floorDecal( 0.50f, F + 1.2f, 0.90f, 65.0f);
+
+    glPopAttrib();
 }
