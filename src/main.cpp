@@ -11,6 +11,7 @@
 //   F - Iluminacao                                   -> lighting.*, lanterna (spot), nevoa, bateria baixa aqui
 //   H - Texturas (procedurais)                       -> textures.*, aplicadas em scene_builder.cpp
 //   I - Atmosfera (vinheta, granulado, balanco de camera) -> computeSway(), drawAtmosphere()
+//   J - Audio procedural (sintese em codigo)         -> audio.*, eventos e parametros em timerFunc()
 //   G - Curvas parametricas (Bezier)                 -> bezier.*, usado em currentMonsterPosition()
 //
 // ------------------------------------------------------------
@@ -85,6 +86,7 @@
 #include "scene_builder.h"
 #include "enemy.h"
 #include "textures.h"
+#include "audio.h"
 
 // Tudo dentro do namespace anonimo so' existe neste arquivo (nao vaza
 // pra outros .cpp), o equivalente moderno de declarar tudo "static".
@@ -135,6 +137,13 @@ const float MONSTER_CENTER_Y    = 1.5f;   // altura do centro do corpo do monstr
 // encurta, e ela falha (pisca e apaga por instantes). Quanto mais perto
 // de 0%, pior. Quando falha, nao afasta o monstro.
 const float FLASH_LOW_FRAC = 0.25f;
+
+// Cor e forca da luz da lanterna. O main.cpp define TUDO da GL_LIGHT0 (nao
+// depende do que o lighting.cpp deixou configurado): cor quente, intensidade
+// acima de 1 pra iluminar bem o monstro mesmo de longe, e uma atenuacao
+// suave (a 8 m resta ~67% da luz, a 15 m ~43%, a 22 m ~28%).
+const float FLASH_R = 1.00f, FLASH_G = 0.96f, FLASH_B = 0.88f;
+const float FLASH_INTENSITY = 1.5f;
 
 // Nevoa: densidade da nevoa exponencial (GL_EXP2). A visibilidade cai com
 // a distancia como exp(-(densidade*distancia)^2): com 0.045, a 10 m
@@ -200,10 +209,16 @@ float g_power        = POWER_MAX;
 bool  g_beamHit      = false; // o feixe da lanterna esta' acertando o monstro agora?
 bool  g_debug        = false; // painel de depuracao (F3)
 float g_flashLevel   = 1.0f;  // 0..1: quanto a lanterna esta' funcionando (cai com bateria baixa)
-GLfloat g_flashBase[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // cor original da luz da lanterna (lida do lighting.cpp)
-bool  g_flashBaseCached = false;
 float g_danger       = 0.0f;  // 0 = calmo, 1 = perigo maximo (alimenta a atmosfera)
 GLuint g_grainTex    = 0;     // textura de ruido do granulado
+// Fases INTEGRADAS (somadas dt a dt) do batimento e da respiracao. Nao da'
+// pra usar "tempo * velocidade": a velocidade muda com o perigo, e a fase
+// "pularia" a cada mudanca. Somando passo a passo, so' a velocidade muda.
+float g_heartPhase   = 0.0f;  // radianos; alimenta a vinheta pulsante e o som do coracao
+float g_breathPhase  = 0.0f;  // radianos; alimenta a respiracao da camera
+int   g_lastHour     = 0;     // ultima "hora" da noite que ja tocou o sino
+bool  g_monsterMoved = false; // o monstro andou neste frame? (so' entao ha' passos)
+bool  g_doorMoving   = false; // a porta esta' em movimento? (motor + pancada ao parar)
 
 // Porta: g_doorClosing e' o que o jogador PEDIU; g_doorOffsetY e' onde a
 // porta REALMENTE esta' (ela anima suavemente ate' o alvo).
@@ -307,6 +322,9 @@ void resetGame() {
     g_monitorOn         = false;
     g_beamHit           = false;
     g_danger            = 0.0f;
+    g_lastHour          = 0;
+    g_monsterMoved      = false;
+    g_doorMoving        = false;
     g_doorClosing       = false;
     g_doorOffsetY       = 0.0f;
 
@@ -408,30 +426,47 @@ bool flashlightHits(const Vector3& eye, const Vector3& dir,
     return angle <= beamHalfAngle() + slack;
 }
 
-// Transforma a luz da lanterna (GL_LIGHT0) num SPOT: um cone de luz
-// apontado pra "dir", com a mesma abertura do feixe, em vez de uma luz
-// que brilha igual pra todos os lados. GL_SPOT_EXPONENT concentra a
-// intensidade no centro do cone. Chamar depois do updateFlashlight e do
-// gluLookAt: o OpenGL transforma a direcao pela matriz atual.
-void setupFlashlightSpot(const Vector3& dir) {
-    const GLfloat d[3] = { dir.x, dir.y, dir.z };
-    glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, d);
+// Configura a luz da lanterna (GL_LIGHT0) por inteiro: um SPOT, ou seja, um
+// cone de luz saindo do olho do jogador pra frente, em vez de uma luz que
+// brilha igual pra todos os lados.
+//  - Posicao e direcao sao dadas com a matriz IDENTIDADE: assim ficam em
+//    coordenadas do OLHO (posicao (0,0,0), direcao (0,0,-1)), grudadas na
+//    camera (inclusive no balanco e no roll), sem depender do que o
+//    lighting.cpp fez.
+//  - Cor e intensidade: FLASH_* x nivel da lanterna (cai com a bateria
+//    baixa), puxada pro amarelo/laranja conforme a bateria acaba. Nao le
+//    nada da luz anterior: valores lidos com a lanterna apagada seriam
+//    pretos e a lanterna nao iluminaria nada.
+//  - GL_SPOT_EXPONENT concentra a intensidade no centro do cone.
+// Desligada: so' apaga a luz.
+void setupFlashlight() {
+    if (!g_flashlightOn) { glDisable(GL_LIGHT0); return; }
+    glEnable(GL_LIGHT0);
+
+    glPushMatrix();
+    glLoadIdentity();
+    const GLfloat pos[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const GLfloat dir[3] = { 0.0f, 0.0f, -1.0f };
+    glLightfv(GL_LIGHT0, GL_POSITION, pos);
+    glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, dir);
+    glPopMatrix();
+
     glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, beamHalfAngle() + 3.0f);
     glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, 12.0f);
+    glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION,  1.0f);
+    glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION,    0.03f);
+    glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.004f);
 
-    // Intensidade e cor da luz: parte da cor ORIGINAL definida no
-    // lighting.cpp (lida uma vez), multiplicada pelo nivel da lanterna e
-    // puxada pro amarelo/laranja conforme a bateria acaba.
-    if (!g_flashBaseCached) {
-        glGetLightfv(GL_LIGHT0, GL_DIFFUSE, g_flashBase);
-        g_flashBaseCached = true;
-    }
     float low = lowPower();
-    const GLfloat diff[4] = { g_flashBase[0] * g_flashLevel,
-                              g_flashBase[1] * g_flashLevel * (1.0f - 0.20f * low),
-                              g_flashBase[2] * g_flashLevel * (1.0f - 0.45f * low),
-                              1.0f };
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, diff);
+    float k = FLASH_INTENSITY * g_flashLevel;
+    const GLfloat amb[4]  = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const GLfloat diff[4] = { FLASH_R * k,
+                              FLASH_G * k * (1.0f - 0.20f * low),
+                              FLASH_B * k * (1.0f - 0.45f * low), 1.0f };
+    const GLfloat spec[4] = { 0.8f * diff[0], 0.8f * diff[1], 0.8f * diff[2], 1.0f };
+    glLightfv(GL_LIGHT0, GL_AMBIENT,  amb);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE,  diff);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, spec);
 }
 
 // Desenha o FEIXE VISIVEL da lanterna: luz volumetrica saindo da "mao"
@@ -761,6 +796,8 @@ void applyShot(int i) {
     g_photoHud = false;
     g_photoTime = 2.0f;
     g_danger = 0.0f;
+    g_heartPhase = 0.0f;
+    g_breathPhase = 3.2f;
     g_walkTime = 1.1f;
     g_yawDeg = 0.0f;
     g_pitchDeg = 0.0f;
@@ -828,7 +865,7 @@ void applyShot(int i) {
         break; }
     default: { // perigo alto: monstro perto, vinheta vermelha, nevoa mais densa
         g_flashlightOn = true; g_power = 55.0f; g_nightTime = 200.0f;
-        g_monsterT = 0.88f; g_photoHud = true; g_danger = 0.9f;
+        g_monsterT = 0.88f; g_photoHud = true; g_danger = 0.9f; g_heartPhase = 1.5707963f;
         break; }
     }
 }
@@ -1198,6 +1235,7 @@ int menuItemAt(int mx, int my) {
 }
 
 void activateMenu(int i) {
+    audioEvent(EVT_MENU_SELECT);
     if (g_state == STATE_MENU) {
         if (i == 0) { resetGame(); g_yawDeg = 0.0f; g_pitchDeg = 0.0f; }
         else exit(0);
@@ -1411,7 +1449,7 @@ void drawGrain(float alpha) {
 void drawAtmosphere() {
     hudBegin();
     float d = g_danger;
-    float ph = g_uiTime * (4.5f + 5.0f * d);          // fase do batimento (rad)
+    float ph = g_heartPhase;                          // fase do batimento (rad), integrada no timer
     float beat = powf(fmaxf(0.0f, sinf(ph)), 8.0f)
                + 0.6f * powf(fmaxf(0.0f, sinf(ph - 0.9f)), 8.0f);
     float edge = (VIGNETTE_BASE + 0.45f * d) * (1.0f + 0.35f * d * beat);
@@ -1464,10 +1502,9 @@ struct CamSway { float dx, dy, yaw, pitch, roll; }; // metros e graus
 CamSway computeSway() {
     CamSway s = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
     const float t = g_uiTime, d = g_danger;
-    float rate = 1.6f * (1.0f + 1.2f * d);
     float amp  = 1.0f + 1.5f * d;
-    s.dy    = 0.010f * amp * sinf(t * rate);
-    s.pitch = 0.35f  * amp * sinf(t * rate + 0.6f);
+    s.dy    = 0.010f * amp * sinf(g_breathPhase);          // fase integrada no timer
+    s.pitch = 0.35f  * amp * sinf(g_breathPhase + 0.6f);
     s.yaw   = 0.25f  * amp * sinf(t * 0.9f + 1.3f);
     s.roll  = 0.30f  * amp * sinf(t * 0.7f);
 
@@ -1564,7 +1601,7 @@ void display() {
     // na camera. Em seguida a transformamos num cone (spot) apontado pra dir.
     updateFlashlight(g_flashlightOn);
     updateFlashLevel();            // lanterna fraca com bateria baixa
-    setupFlashlightSpot(dir);
+    setupFlashlight();             // o main.cpp define a luz da lanterna por inteiro
 
     // Modo foto: luz ambiente extra pra enxergar o cenario
     GLfloat prevAmbient[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -1647,6 +1684,15 @@ void pauseGame() {
     g_state = STATE_PAUSED;
     g_stateTimer = 0.0f;
     g_menuSel = 0;
+    audioEvent(EVT_MENU_MOVE);
+}
+
+// Muda o item selecionado do menu (com tick sonoro so' se mudou de fato).
+void menuSelect(int i) {
+    if (i != g_menuSel) {
+        g_menuSel = i;
+        audioEvent(EVT_MENU_MOVE);
+    }
 }
 
 // [Requisito D] Teclado. Depende do estado atual do jogo:
@@ -1663,9 +1709,9 @@ void keyboard(unsigned char key, int, int) {
         } else if (key == 'p' || key == 'P') {
             if (g_state == STATE_PAUSED) g_state = STATE_PLAYING;
         } else if (key == 'w' || key == 'W') {
-            g_menuSel = (g_menuSel + n - 1) % n;
+            menuSelect((g_menuSel + n - 1) % n);
         } else if (key == 's' || key == 'S') {
-            g_menuSel = (g_menuSel + 1) % n;
+            menuSelect((g_menuSel + 1) % n);
         } else if (key == 13 || key == ' ') {              // Enter / Espaco
             activateMenu(g_menuSel);
         }
@@ -1693,8 +1739,8 @@ void keyboard(unsigned char key, int, int) {
         case 'f':
         case 'F':
             // So' liga se ainda tiver energia; desligar sempre pode.
-            if (g_flashlightOn)      g_flashlightOn = false;
-            else if (g_power > 0.0f) g_flashlightOn = true;
+            if (g_flashlightOn)      { g_flashlightOn = false; audioEvent(EVT_FLASH_OFF); }
+            else if (g_power > 0.0f) { g_flashlightOn = true;  audioEvent(EVT_FLASH_ON); }
             break;
         case 'd':
         case 'D':
@@ -1703,8 +1749,8 @@ void keyboard(unsigned char key, int, int) {
             break;
         case 'c':
         case 'C':
-            if (g_monitorOn)         g_monitorOn = false;
-            else if (g_power > 0.0f) g_monitorOn = true;
+            if (g_monitorOn)         { g_monitorOn = false; audioEvent(EVT_MONITOR_OFF); }
+            else if (g_power > 0.0f) { g_monitorOn = true;  audioEvent(EVT_MONITOR_ON); }
             break;
         default:
             break;
@@ -1725,8 +1771,8 @@ void special(int key, int, int) {
     if (g_photoActive) return;
     if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
         int n = menuCount();
-        if (key == GLUT_KEY_UP)        g_menuSel = (g_menuSel + n - 1) % n;
-        else if (key == GLUT_KEY_DOWN) g_menuSel = (g_menuSel + 1) % n;
+        if (key == GLUT_KEY_UP)        menuSelect((g_menuSel + n - 1) % n);
+        else if (key == GLUT_KEY_DOWN) menuSelect((g_menuSel + 1) % n);
     }
 }
 
@@ -1756,7 +1802,7 @@ void passiveMotion(int x, int y) {
 
     if (g_state == STATE_MENU || g_state == STATE_PAUSED) {
         int i = menuItemAt(x, y);
-        if (i >= 0) g_menuSel = i;
+        if (i >= 0) menuSelect(i);
         return;
     }
 
@@ -1773,6 +1819,46 @@ void passiveMotion(int x, int y) {
 
     g_warping = true;
     glutWarpPointer(g_windowW / 2, g_windowH / 2);
+}
+
+// --- Ponte jogo -> audio -----------------------------------------
+// true se a fase "atravessou" um pico de seno (pi/2 + 2*pi*k) entre o
+// frame anterior (prev) e este (cur). "offset" desloca o pico (0 = 1a
+// batida do coracao, 0.9 = 2a). E' o mesmo seno da vinheta, entao o som
+// bate junto com o pulso visual.
+bool crossedPeak(float prev, float cur, float offset) {
+    const float PEAK = 1.5707963f, TAU = 6.2831853f;
+    int a = (int)floorf((prev - offset - PEAK) / TAU);
+    int b = (int)floorf((cur  - offset - PEAK) / TAU);
+    return b > a;
+}
+
+// Descreve ao audio o que esta' acontecendo. Chamada todo frame.
+void updateAudio() {
+    AudioParams a;
+    bool menuLike = (g_state == STATE_MENU || g_state == STATE_PAUSED);
+    bool playing  = (g_state == STATE_PLAYING);
+    a.master = menuLike ? 0.35f : (g_state == STATE_GAME_OVER ? 0.55f : 1.0f);
+    a.danger = g_danger;
+
+    // Posicao do monstro em relacao ao jogador: distancia e direcao. O pan
+    // usa o angulo do monstro MENOS pra onde o jogador olha: virar a cabeca
+    // move o som no estereo.
+    Vector3 mp = currentMonsterPosition();
+    float dx = mp.x - g_eye.x, dz = mp.z - g_eye.z, dy = MONSTER_CENTER_Y - g_eye.y;
+    a.monsterDist = sqrtf(dx * dx + dz * dz + dy * dy);
+    float ang = atan2f(dx, -dz);                     // 0 = direto a frente; positivo = direita
+    a.monsterPan = sinf(ang - g_yawDeg * DEG2RAD);
+
+    a.stepHz       = (playing && g_monsterMoved) ? (g_sprinting ? 2.25f : 1.02f) : 0.0f;
+    a.doorMoving   = (playing && g_doorMoving) ? 1.0f : 0.0f;
+    a.flashLevel   = (playing && g_flashlightOn) ? g_flashLevel : 0.0f;
+    a.beamHit      = (playing && g_beamHit) ? 1.0f : 0.0f;
+    a.monitorOn    = (playing && g_monitorOn) ? 1.0f : 0.0f;
+    float f = clamp01((mp.z - Scene::CORRIDOR_FAR_Z) / (Scene::ROOM_FRONT_Z - Scene::CORRIDOR_FAR_Z));
+    a.monitorClose = clamp01((f - 0.6f) * 2.5f);
+    a.powerDead    = (playing && g_power <= 0.0f) ? 1.0f : 0.0f;
+    audioSetParams(a);
 }
 
 // ===============================================================
@@ -1822,19 +1908,34 @@ void timerFunc(int) {
     // Em vez de teleportar, move DOOR_SPEED * dt por frame na direcao do
     // alvo, sem passar dele (fminf/fmaxf).
     float doorTarget = g_doorClosing ? Scene::DOORWAY_HEIGHT : 0.0f;
+    bool doorWasMoving = g_doorMoving;
     if (g_state != STATE_PAUSED) {
         if (g_doorOffsetY < doorTarget)
             g_doorOffsetY = fminf(g_doorOffsetY + DOOR_SPEED * dt, doorTarget);
         else if (g_doorOffsetY > doorTarget)
             g_doorOffsetY = fmaxf(g_doorOffsetY - DOOR_SPEED * dt, doorTarget);
     }
+    // Som da porta: rele ao comecar a mexer; pancada forte ao fechar por
+    // completo, baque leve ao terminar de abrir.
+    g_doorMoving = (g_state != STATE_PAUSED) && fabsf(g_doorOffsetY - doorTarget) > 0.001f;
+    if (g_state == STATE_PLAYING) {
+        if (!doorWasMoving && g_doorMoving) audioEvent(EVT_RELAY);
+        if (doorWasMoving && !g_doorMoving)
+            audioEvent(g_doorOffsetY > 0.5f * Scene::DOORWAY_HEIGHT ? EVT_DOOR_SLAM : EVT_DOOR_CLUNK);
+    }
     // A porta so' "veda" quando chegou ao chao (o 0.01 e' folga numerica).
     bool doorSealed = g_doorOffsetY >= (Scene::DOORWAY_HEIGHT - 0.01f);
+
+    if (g_state != STATE_PLAYING) g_monsterMoved = false;
 
     // --- 4. Logica por estado ---
     if (g_state == STATE_PLAYING) {
         g_nightTime += dt;
         g_walkTime  += dt * (g_sprinting ? SPRINT_ANIM_BOOST : 1.0f);
+
+        // sino distante a cada "hora" da noite (a noite tem 6)
+        int hour = (int)(g_nightTime / (NIGHT_DURATION / 6.0f));
+        if (hour > g_lastHour) { g_lastHour = hour; if (hour < 6) audioEvent(EVT_CHIME); }
 
         // Bateria: lanterna, porta fechada e monitor consomem energia. Ao
         // zerar, tudo para de funcionar e nao volta mais.
@@ -1842,8 +1943,10 @@ void timerFunc(int) {
         if (g_flashlightOn) drain += POWER_DRAIN_LIGHT;
         if (g_doorClosing)  drain += POWER_DRAIN_DOOR;
         if (g_monitorOn)    drain += POWER_DRAIN_MONITOR;
+        float powerBefore = g_power;
         g_power -= drain * dt;
         if (g_power <= 0.0f) {
+            if (powerBefore > 0.0f) audioEvent(EVT_POWER_OUT);
             g_power        = 0.0f;
             g_flashlightOn = false;
             g_monitorOn    = false;
@@ -1893,6 +1996,7 @@ void timerFunc(int) {
             if (g_beamHit) rate = g_sprinting ? (advance - retreat) : -retreat;
             else           rate = advance;
         }
+        float prevMonsterT = g_monsterT;
         g_monsterT += rate * dt;
 
         // Mantem t em [0,1]. Quando o monstro e' empurrado ate' o fundo
@@ -1909,6 +2013,7 @@ void timerFunc(int) {
             g_repelled = false;
         }
         if (g_monsterT > 1.0f) g_monsterT = 1.0f;
+        g_monsterMoved = fabsf(g_monsterT - prevMonsterT) > 0.00001f;
 
         // Condicoes de fim. Perder tem prioridade sobre ganhar: se o
         // monstro chegou no mesmo frame em que amanheceu, voce perde.
@@ -1916,10 +2021,12 @@ void timerFunc(int) {
             g_state             = STATE_JUMPSCARE;
             g_jumpscareProgress = 0.0f;
             g_beamHit           = false;
+            audioEvent(EVT_JUMPSCARE);
         } else if (g_nightTime >= NIGHT_DURATION) {
             g_nightTime  = NIGHT_DURATION;
             g_state      = STATE_WON;
             g_stateTimer = 0.0f;
+            audioEvent(EVT_WIN);
         }
     } else if (g_state == STATE_JUMPSCARE) {
         // O progresso vai de 0 a 1 em JUMPSCARE_DURATION segundos; a
@@ -1949,6 +2056,17 @@ void timerFunc(int) {
     }
     dangerTarget = clamp01(dangerTarget);
     g_danger += (dangerTarget - g_danger) * clamp01(dt * (dangerTarget > g_danger ? 4.0f : 1.2f));
+
+    // --- FASES do batimento e da respiracao (integradas dt a dt) e batidas
+    // do coracao: cada vez que a fase passa por um pico, toca uma batida.
+    float prevHeart = g_heartPhase;
+    g_heartPhase  += dt * (4.5f + 5.0f * g_danger);
+    g_breathPhase += dt * 1.6f * (1.0f + 1.2f * g_danger);
+    if (g_state == STATE_PLAYING || g_state == STATE_JUMPSCARE) {
+        if (crossedPeak(prevHeart, g_heartPhase, 0.0f)) audioEvent(EVT_HEART_LUB);
+        if (crossedPeak(prevHeart, g_heartPhase, 0.9f)) audioEvent(EVT_HEART_DUB);
+    }
+    updateAudio();
 
     // --- 5. Redesenha e se reagenda (16 ms ~ 60 quadros por segundo) ---
     glutPostRedisplay();
@@ -2033,6 +2151,12 @@ int main(int argc, char** argv) {
     resetGame();
     g_state = STATE_MENU;                // o jogo abre no menu inicial
     g_stateTimer = 0.0f;
+
+    if (!photoMode) {
+        // Audio: se nao houver dispositivo, o jogo segue mudo.
+        if (audioInit()) { std::atexit(audioShutdown); std::printf("Audio: ligado.\n"); }
+        else             { std::printf("Audio: sem dispositivo (o jogo roda mudo).\n"); }
+    }
 
     g_lastTimeMs = glutGet(GLUT_ELAPSED_TIME);
     glutTimerFunc(16, timerFunc, 0);     // dispara o primeiro tick do laco do jogo

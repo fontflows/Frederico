@@ -2,6 +2,7 @@
 #include "lighting.h"
 #include "bezier.h" // Vector3
 #include "textures.h"
+#include "audio.h"
 
 #ifdef __APPLE__
     #include <GLUT/glut.h>
@@ -1051,6 +1052,7 @@ static void drawCorridorProps(float time) {
     // --- lampadas piscando (luz + suporte) ---
     float levelA = lampLevel(time, 0.0f);
     float levelB = lampLevel(time, 3.1f);
+    audioSetLamps(levelA, levelB);   // o zumbido das lampadas acompanha o brilho real
     setupCorridorLight(CORRIDOR_LIGHT_A, 0.0f, CH - 0.2f, lampZ(0), levelA);
     setupCorridorLight(CORRIDOR_LIGHT_B, 0.0f, CH - 0.2f, lampZ(1), levelB);
     drawLampFixture(lampZ(0), levelA);

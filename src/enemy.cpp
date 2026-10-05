@@ -51,11 +51,13 @@ namespace {
 
     // Ajustes rapidos de visual
     const float MONSTER_SCALE     = 1.0f;   // escala geral (diminua se a cartola bater no teto)
-    // Brilho dos olhos no escuro, de 0 a 1. Com 0 os olhos so' acendem
-    // no jumpscare (o jogador nao enxerga o monstro no escuro, o que
-    // mantem a mecanica de "vigiar com a lanterna"). Com 1 os olhos ficam
-    // sempre brilhando e entregam onde ele esta'.
-    const float EYE_GLOW_IN_DARK  = 0.0f;
+    // Brilho dos olhos no escuro, de 0 a 1: dois pontos vermelhos que deixam
+    // ver o monstro VINDO pela escuridao (e como ele balanca ao andar), em
+    // vez de ele so' "aparecer" perto da porta. A nevoa apaga os olhos de
+    // longe, entao so' aparecem a uns 15 m. Com 0 os olhos so' acendem no
+    // jumpscare (o jogador nao enxerga o monstro no escuro: mais dificil e
+    // o monitor vale mais). Com 1 brilham forte e sempre.
+    const float EYE_GLOW_IN_DARK  = 0.7f;
 
     // ---------------------------------------------------------------
     // Paleta
@@ -376,6 +378,7 @@ namespace {
 
         float eyeGlow = EYE_GLOW_IN_DARK;
         if (mouthOpen > 0.15f) eyeGlow = 1.0f;     // olhos acendem no susto
+        eyeGlow *= 0.85f + 0.15f * sinf(walkTime * 6.0f);   // oscila de leve
 
         // --- cranio e orelhas ---
         paint(FUR);
