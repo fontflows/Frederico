@@ -1,0 +1,29 @@
+// Recursos do Windows para o frederico.exe (compilado pelo windres).
+//
+// "1" e' o icone que o Explorador de Arquivos mostra pro .exe e que
+// aparece na barra de tarefas. "GLUT_ICON" e' o nome que o freeglut
+// procura pra colocar o icone na barra de titulo da janela do jogo.
+1         ICON "frederico.ico"
+GLUT_ICON ICON "frederico.ico"
+
+// Informacoes que aparecem em Propriedades > Detalhes do .exe.
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041604B0"
+        BEGIN
+            VALUE "ProductName",      "1 Noite no Frederico"
+            VALUE "FileDescription",  "1 Noite no Frederico"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "OriginalFilename", "frederico.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0416, 0x04B0
+    END
+END

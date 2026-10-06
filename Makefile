@@ -26,8 +26,17 @@ ifeq ($(OS),Windows_NT)
     # tempo de execucao, entao NAO precisa de nenhuma biblioteca extra aqui.
     LIBS := -lfreeglut -lopengl32 -lglu32
     BIN  := frederico.exe
-    RM   := del /Q
-    FIXPATH = $(subst /,\,$1)
+    # "del" NAO serve aqui: e' um comando interno do cmd.exe (nao um programa),
+    # entao o make nao consegue executa-lo e o clean falha. O rm.exe do MSYS2
+    # e' um programa de verdade (funciona no cmd, PowerShell e MSYS2) e o "-f"
+    # nao reclama de arquivo que nao existe.
+    RM   := C:/msys64/usr/bin/rm.exe -f
+    FIXPATH = $1
+    # Icone do .exe: o windres (do mesmo MSYS2) compila o frederico.rc (que aponta
+    # pro frederico.ico) num objeto, e ele e' linkado junto com o resto.
+    WINDRES := C:/msys64/mingw64/bin/windres.exe
+    RC_OBJ  := $(SRC_DIR)/frederico_rc.o
+    OBJS    += $(RC_OBJ)
 else
     CXX := g++
     UNAME_S := $(shell uname -s)
@@ -57,6 +66,13 @@ $(BIN): $(OBJS)
 # silencia os avisos (-w). Por ser maior, ele demora uns 15-20 s na 1a vez.
 $(SRC_DIR)/audio.o: $(SRC_DIR)/audio.cpp
 	$(CXX) $(CXXFLAGS) -w -c $< -o $@
+
+# So' no Windows: compila o recurso do icone. "-I src" e' onde o windres
+# procura o frederico.ico que o .rc referencia.
+ifeq ($(OS),Windows_NT)
+$(RC_OBJ): $(SRC_DIR)/frederico.rc $(SRC_DIR)/frederico.ico
+	$(WINDRES) -I $(SRC_DIR) -i $< -o $@
+endif
 
 clean:
 	$(RM) $(call FIXPATH, $(OBJS) $(DEPS) $(BIN))

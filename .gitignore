@@ -1,3 +1,4 @@
 *.o
 *.exe
+*.d
 /quarto_do_vigia
